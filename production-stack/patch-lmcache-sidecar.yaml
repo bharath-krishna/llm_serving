@@ -1,0 +1,97 @@
+# Strategic-merge patch applied by post-render.sh on top of the Helm output.
+#
+# The vllm-stack chart (0.1.12) has no field for an arbitrary sidecar, hostIPC,
+# or a pod-level CDI annotation, so the LMCache multiprocess (MP) server is
+# injected here as a native sidecar in the nemotron engine pod.
+#
+# Why a sidecar and not a separate Deployment:
+#   LMCacheMPConnector is the only LMCache connector that handles this hybrid
+#   Mamba+attention model. Its hybrid-capable transport is `lmcache_driven` =
+#   CUDA IPC + POSIX /dev/shm, which is strictly node-local and needs a shared
+#   IPC namespace. Same-pod containers share the IPC namespace and (via the
+#   `dshm` emptyDir) /dev/shm, and reach each other on localhost — so no
+#   hostIPC / hostNetwork / hostPath is required.
+#
+# GPU for the sidecar:
+#   The node's device plugin uses CDI (DEVICE_LIST_STRATEGY=cdi-*), so
+#   NVIDIA_VISIBLE_DEVICES is ignored and only the vLLM container's
+#   `nvidia.com/gpu: 1` request gets a GPU. The pod annotation
+#   `cdi.k8s.io/lmcache: nvidia.com/gpu=0` injects the same GPU (device nodes +
+#   driver libs) into every container in the pod WITHOUT consuming the
+#   allocatable count — verified on this node. The vLLM container receives a
+#   redundant injection of the same device; containerd 2.x dedupes it.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-nemotron-deployment-vllm
+spec:
+  template:
+    metadata:
+      annotations:
+        cdi.k8s.io/lmcache: "nvidia.com/gpu=0"
+    spec:
+      initContainers:
+        - name: lmcache-mp-server
+          # restartPolicy: Always turns this initContainer into a native
+          # sidecar (k8s >= 1.29; node is 1.31): it starts first, stays up for
+          # the life of the pod, and the vLLM container only starts once this
+          # one passes its startupProbe (ZMQ socket open).
+          restartPolicy: Always
+          # Same image as the engine => identical LMCache 0.5.3 => the MP wire
+          # protocol always matches. No separate image to build or pull.
+          image: vllm/vllm-openai:v0.27.1
+          command:
+            - python3
+            - -m
+            - lmcache.v1.multiprocess.server
+            - --host
+            - "0.0.0.0"
+            - --port
+            - "6555"
+            # --chunk-size MUST equal (or be a multiple of) vLLM's unified
+            # block_size for this model = 2192, and match --max-num-batched-tokens.
+            - --chunk-size
+            - "2192"
+            # Required for Mamba / linear-attention hybrids: gives the mamba
+            # state layers their own cache objects, separate from the full-
+            # attention layers.
+            - --separate-object-groups
+            # CPU L1 tier size (GiB). Lives in /dev/shm (see dshm sizeLimit).
+            # Dial down first if the node hits memory pressure.
+            - --l1-size-gb
+            - "16"
+            - --eviction-policy
+            - LRU
+            - --max-workers
+            - "4"
+            # lmcache_driven = server pulls/pushes KV via CUDA IPC or CPU SHM.
+            # This is the only path that supports hybrid KV cache groups.
+            - --supported-transfer-mode
+            - lmcache_driven
+          env:
+            # DEBUG during bringup to confirm store/load activity; switch to
+            # INFO once verified.
+            - name: LMCACHE_LOG_LEVEL
+              value: "DEBUG"
+          volumeMounts:
+            # The SAME emptyDir the vLLM container mounts at /dev/shm — this is
+            # the shared-memory channel for KV blocks.
+            - name: dshm
+              mountPath: /dev/shm
+          resources:
+            requests:
+              cpu: "2"
+              memory: 20Gi
+            limits:
+              memory: 24Gi
+          startupProbe:
+            tcpSocket:
+              port: 6555
+            initialDelaySeconds: 5
+            periodSeconds: 3
+            failureThreshold: 40
+          livenessProbe:
+            tcpSocket:
+              port: 6555
+            periodSeconds: 15
+            failureThreshold: 4

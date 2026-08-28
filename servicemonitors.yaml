@@ -1,0 +1,49 @@
+# Prometheus scrape config for the vLLM engine and the LMCache MP server.
+#
+# The cluster's kube-prometheus-stack Prometheus has:
+#   serviceMonitorSelector:          matchLabels: {release: prometheus}
+#   serviceMonitorNamespaceSelector: {}   (all namespaces)
+# so every ServiceMonitor here MUST carry the label `release: prometheus`.
+#
+#   kubectl apply -f servicemonitors.yaml
+#   # verify it was picked up (~30s):
+#   kubectl -n monitoring exec sts/prometheus-prometheus-kube-prometheus-prometheus -c prometheus -- \
+#     wget -qO- localhost:9090/api/v1/targets | grep -o '"job":"[^"]*"' | sort -u
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: vllm-nemotron
+  namespace: vllm
+  labels:
+    release: prometheus
+spec:
+  selector:
+    matchLabels:
+      app: vllm-nemotron        # the Service `vllm-nemotron` (port name: http -> 8000)
+  namespaceSelector:
+    matchNames: ["vllm"]
+  endpoints:
+    - port: http                # vLLM serves /metrics on the API port
+      path: /metrics
+      interval: 15s
+      scrapeTimeout: 10s
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: lmcache
+  namespace: vllm
+  labels:
+    release: prometheus
+spec:
+  selector:
+    matchLabels:
+      monitoring: "true"        # only the headless `lmcache` Service (not `lmcache-http`)
+  namespaceSelector:
+    matchNames: ["vllm"]
+  endpoints:
+    - port: http                # FastAPI frontend on 8080 also serves /metrics
+      path: /metrics
+      interval: 15s
+      scrapeTimeout: 10s

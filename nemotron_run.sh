@@ -1,0 +1,18 @@
+/bin/bash -c exec vllm serve nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 \
+    --served-model-name nemotron-3.5-lightning \
+    --max-num-seqs 128 \
+    --max-model-len 1048576 \
+    --enable-prefix-caching \
+    --async-scheduling \
+    --max-num-batched-tokens 2192 \
+    --mamba-backend flashinfer \
+    --mamba-ssm-cache-dtype float16 \
+    --gpu-memory-utilization 0.60 \
+    --mamba-cache-mode align \
+    --enable-mamba-cache-stochastic-rounding \
+    --mamba-cache-philox-rounds 5 \
+    --reasoning-parser nemotron_v3 \
+    --enable-auto-tool-choice \
+    --tool-call-parser qwen3_coder \
+    --host 0.0.0.0 \
+    --port 8000

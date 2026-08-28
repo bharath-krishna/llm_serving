@@ -1,0 +1,220 @@
+# LMCache multiprocess (MP) standalone server — pairs with the LMCacheMPConnector
+# in nemotron-deployment.yaml (kv-transfer-config host
+# `lmcache.vllm.svc.cluster.local`, port 5555).
+#
+# ─── Deviations from the upstream `docker run lmcache/standalone:nightly` recipe ───
+#
+#  1. IMAGE: `lmcache/standalone:nightly` is published amd64-only — it will not run
+#     on this arm64 node (DGX Spark / GB10). This uses `vllm/vllm-openai:v0.27.1`
+#     instead, which is arm64 and ships the SAME LMCache (0.5.3) that the engine
+#     container has bundled — so the MP wire protocol matches exactly. The server
+#     entrypoint is the module (`python3 -m lmcache.v1.multiprocess.server`); the
+#     `lmcache server` CLI shim only exists in the standalone image.
+#
+#  2. `--network host`  → replaced by the ClusterIP Service below. The connector
+#     reaches the server over ZeroMQ at the Service DNS name; no host networking.
+#
+#  3. `--ipc host`      → `hostIPC: true` (needed for CUDA IPC + POSIX /dev/shm,
+#     which is how KV blocks actually move — it is strictly node-local).
+#
+#  4. `--gpus all`      → the single GPU is already claimed by the nemotron pod, so
+#     this pod cannot request `nvidia.com/gpu`. The pod annotation
+#     `cdi.k8s.io/lmcache: nvidia.com/gpu=0` injects GPU device nodes + driver libs
+#     via CDI WITHOUT consuming the allocatable count (the node's device plugin is
+#     CDI-only, so NVIDIA_VISIBLE_DEVICES does nothing). Verified on this node.
+#
+#  5. `--port 6555`     → 5555, to match `lmcache.mp.port` in nemotron-deployment.yaml.
+#
+#  6. `--chunk-size 2128 --separate-object-groups` added: REQUIRED for the Nemotron
+#     hybrid Mamba+attention model. 2128 is vLLM's unified block size for this model
+#     WITHOUT DSpark ("Setting attention block size to 2128 tokens ..." in the engine
+#     log — it was 2192 with DSpark) and must equal the server chunk size. The engine
+#     also needs `--max-num-batched-tokens` in [2128, 4256).
+#
+#  7. TIERING: L1 is a small (16Gi) pinned-DRAM hot tier; cold blocks spill to an
+#     `fs` L2 adapter on the node's NVMe (`/kv-l2` → hostPath). A large DRAM-only
+#     L1 (the original 60Gi) starves the model — on this unified-memory GB10 the
+#     GPU and L1 draw from the same 128Gi pool.
+#
+#     GPUDirect Storage (`--gds-l1-path`) — the obvious way to put L1 on NVMe —
+#     is NOT usable here: (a) the `cufile` Python bindings are absent from this
+#     image, (b) `nvidia-fs` is not loaded and has no build for the running
+#     kernel 6.17.0-1026-nvidia, so cuFile could only run in bounce-buffer compat
+#     mode, and (c) on unified memory there is no discrete VRAM for GDS to DMA
+#     into, so it buys nothing over the `fs` L2 adapter anyway.
+#
+# ─── PREREQUISITES in nemotron-deployment.yaml for this to actually work ───
+#
+#  A. Add `--max-num-batched-tokens 2192` to the vllm args, or the engine crashes
+#     with "Mamba-hybrid models with LMCache require ... Set --max-num-batched-tokens 2192".
+#
+#  B. Remove the `dshm` emptyDir volume + its `/dev/shm` mount. With `hostIPC: true`
+#     the container already sees the host's /dev/shm; an emptyDir mounted over it
+#     gives the pod a PRIVATE /dev/shm and the cross-pod shared-memory channel to
+#     this server breaks.
+#
+#  C. Remove the three `--speculative_config.*` lines (DSpark). The DSpark draft
+#     model adds a 1024-token sliding-window KV group, and LMCache (through at least
+#     0.5.4) requires the sliding window to be a multiple of the 2192 block size —
+#     1024 % 2192 ≠ 0, so REGISTER_KV_CACHE fails and the engine hangs. DSpark and
+#     LMCache MP are mutually exclusive on this model.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: lmcache
+  namespace: vllm
+  labels:
+    app: lmcache
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: lmcache
+  template:
+    metadata:
+      labels:
+        app: lmcache
+      annotations:
+        # CDI GPU injection without a resource request — see note 4 above.
+        cdi.k8s.io/lmcache: "nvidia.com/gpu=0"
+    spec:
+      runtimeClassName: nvidia
+      hostIPC: true
+      containers:
+        - name: lmcache-server
+          image: vllm/vllm-openai:v0.27.1
+          command:
+            # http_server = the same ZMQ MP server + a FastAPI frontend on
+            # --http-port exposing /status, /healthcheck, /metrics. `lmcache
+            # bench engine` needs /status to auto-resolve tokens-per-GB.
+            - python3
+            - -m
+            - lmcache.v1.multiprocess.http_server
+            - --http-host
+            - "0.0.0.0"
+            - --http-port
+            - "8080"
+            - --host
+            - "0.0.0.0"
+            - --port
+            - "5555"
+            # L1 = hot tier in pinned DRAM. Keep it SMALL: on this unified-memory
+            # GB10 every GB here is a GB the vLLM engine cannot use, and a 60Gi L1
+            # starved the model ("Free memory on device cuda:0 ... less than
+            # desired GPU memory utilization").
+            - --l1-size-gb
+            - "4"
+            - --eviction-policy
+            - LRU
+            - --max-workers
+            - "2"
+            - --chunk-size
+            - "2128"
+            - --separate-object-groups
+            - --supported-transfer-mode
+            - lmcache_driven
+            # L2 = cold tier on NVMe (ext4, ~1.3 TB free). Blocks evicted from the
+            # 16Gi L1 land here instead of being dropped, so the effective cache
+            # is disk-sized without spending DRAM. Plain buffered file I/O — no
+            # GPUDirect Storage (see the GDS note in the header).
+            - --l2-adapter
+            - '{"type":"fs","base_path":"/kv-l2"}'
+          env:
+            - name: LMCACHE_LOG_LEVEL
+              value: "INFO"   # verify store/load activity on bringup; set INFO after
+          volumeMounts:
+            - name: kv-l2
+              mountPath: /kv-l2
+          ports:
+            - name: zmq
+              containerPort: 5555
+            - name: http
+              containerPort: 8080
+          resources:
+            requests:
+              cpu: "4"
+              # ~ --l1-size-gb 16 (pinned DRAM) + runtime overhead. L2 spills to
+              # the NVMe hostPath below and does not count here.
+              memory: 22Gi
+          startupProbe:
+            tcpSocket:
+              port: 5555
+            initialDelaySeconds: 5
+            periodSeconds: 3
+            failureThreshold: 40
+          livenessProbe:
+            tcpSocket:
+              port: 5555
+            periodSeconds: 15
+            failureThreshold: 4
+      volumes:
+        # Cold KV tier on the node's NVMe (ext4 root fs). Survives pod restarts;
+        # `rm -rf /var/lib/lmcache-l2/*` on the node to clear it.
+        - name: kv-l2
+          hostPath:
+            path: /var/lib/lmcache-l2
+            type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: lmcache
+  namespace: vllm
+  labels:
+    app: lmcache
+    monitoring: "true"   # picked up by the ServiceMonitor in servicemonitors.yaml
+spec:
+  selector:
+    app: lmcache
+  clusterIP: None   # headless: the connector opens a direct ZMQ socket, no LB needed
+  ports:
+    - name: zmq
+      port: 5555
+      targetPort: 5555
+    - name: http
+      port: 8080
+      targetPort: 8080
+---
+# Non-headless Service for the Ingress (haproxy needs a ClusterIP, not a
+# headless one). Fronts only the FastAPI HTTP frontend (/status, /healthcheck,
+# /metrics, cache-management APIs) — NOT the ZMQ port.
+apiVersion: v1
+kind: Service
+metadata:
+  name: lmcache-http
+  namespace: vllm
+  labels:
+    app: lmcache
+spec:
+  selector:
+    app: lmcache
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: lmcache
+  namespace: vllm
+  annotations:
+    haproxy.org/timeout-http-request: "600s"
+    haproxy.org/timeout-tunnel: "3600s"
+    haproxy.org/timeout-http-keep-alive: "600s"
+spec:
+  ingressClassName: haproxy
+  rules:
+    - host: lmcache.krishb.in
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: lmcache-http
+                port:
+                  number: 80

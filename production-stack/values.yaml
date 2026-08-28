@@ -1,0 +1,208 @@
+# vLLM Production Stack values for the `vllm` namespace.
+#
+#   helm repo add vllm https://vllm-project.github.io/production-stack
+#   helm upgrade --install vllm vllm/vllm-stack -n vllm -f production-stack/values.yaml
+#
+# Replaces the hand-rolled nemotron-deployment.yaml / gemma4-deployment.yaml.
+# Single-GPU box (DGX Spark): only one modelSpec is `enabled` at a time.
+
+servingEngineSpec:
+  enableEngine: true
+  runtimeClassName: "nvidia"
+
+  modelSpec:
+    # ---------------- Nemotron 3.5 Lightning (NVFP4) ----------------
+    - name: "nemotron"
+      enabled: true
+      # Keep the upstream image: needs v0.27.1 dspark speculative decoding +
+      # mamba support. LMCache is already bundled in this image.
+      repository: "vllm/vllm-openai"
+      tag: "v0.27.1"
+      modelURL: "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4"
+      replicaCount: 1
+      requestGPU: 1
+      requestCPU: 4
+      requestMemory: "48Gi"
+
+      enableTool: true
+      toolCallParser: "qwen3_coder"
+
+      # /dev/shm is an in-pod emptyDir (medium: Memory) shared with the
+      # lmcache-mp-server sidecar — LMCache MP moves KV blocks through POSIX
+      # shared memory here, so both containers must mount the SAME volume.
+      # sizeLimit must exceed the sidecar's --l1-size-gb (16Gi) plus staging.
+      # (Bringing our own /dev/shm also works around two chart bugs: shmSize is
+      # only honored with tensorParallelSize, and the shared-cache volumeMount
+      # renders without a `volumeMounts:` header unless extraVolumeMounts is set.)
+      extraVolumes:
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 32Gi
+      extraVolumeMounts:
+        - name: dshm
+          mountPath: /dev/shm
+
+      vllmConfig:
+        enablePrefixCaching: true
+        maxModelLen: "1048576"   # quoted: helm renders bare ints >1e6 in sci notation
+        maxNumSeqs: 128
+        gpuMemoryUtilization: 0.60
+        # Everything the chart has no first-class field for. Each list item is
+        # one argv token (flag and value are separate entries).
+        extraArgs:
+          - "--served-model-name"
+          - "nemotron-3.5-lightning"
+          - "--async-scheduling"
+          - "--speculative_config.method"
+          - "dspark"
+          - "--speculative_config.model"
+          - "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4-DSpark"
+          - "--speculative_config.num_speculative_tokens"
+          - "3"
+          - "--mamba-backend"
+          - "flashinfer"
+          - "--mamba-ssm-cache-dtype"
+          - "float16"
+          - "--gpu-memory-utilization"
+          - "0.50"
+          - "--mamba-cache-mode"
+          - "align"
+          - "--enable-mamba-cache-stochastic-rounding"
+          - "--mamba-cache-philox-rounds"
+          - "5"
+          - "--reasoning-parser"
+          - "nemotron_v3"
+          - "--enable-auto-tool-choice"
+          - "--tool-call-parser"
+          - "qwen3_coder"
+          # ---- LMCache multiprocess (MP) KV offload ----
+          # LMCacheMPConnector (NOT LMCacheConnectorV1) is the only connector
+          # that supports this hybrid Mamba+attention model: it advertises
+          # hybrid support so vLLM keeps its hybrid KV-cache manager on, and it
+          # stores each KV group separately. (LMCacheConnectorV1 — what the
+          # chart's `lmcacheConfig` emits — instead forces one unified KV spec
+          # and dies with "Failed to promote local KV cache specs to one
+          # unified type" on this model. That's why `lmcacheConfig` stays off.)
+          #
+          # The connector speaks ZeroMQ to a node-local `lmcache ... server`
+          # process and moves KV blocks via CUDA IPC + /dev/shm — so the server
+          # MUST be co-located and share this pod's IPC namespace + /dev/shm.
+          # It runs as the `lmcache-mp-server` sidecar, injected by the helm
+          # post-renderer (see kustomization.yaml / patch-lmcache-sidecar.yaml).
+          # host is plain localhost (shared pod netns); NOT a domain / ingress —
+          # there is no network KV path for a hybrid model.
+          - "--kv-transfer-config"
+          - '{"kv_connector":"LMCacheMPConnector","kv_role":"kv_both","kv_connector_extra_config":{"lmcache.mp.host":"tcp://localhost","lmcache.mp.port":6555}}'
+          # Mamba-hybrid + LMCache hard requirement: block_size <=
+          # max-num-batched-tokens < 2*block_size, so every prefill step
+          # advances exactly one block and each block boundary is snapshotted.
+          # block_size for this model is 2192 ("Setting attention block size to
+          # 2192 tokens ..." in the engine log). Must match the server's
+          # --chunk-size. Engine refuses to start otherwise.
+          - "--max-num-batched-tokens"
+          - "2192"
+
+    # ---------------- Gemma 4 26B Uncensored (NVFP4) ----------------
+    # Defined but disabled: flip `enabled` here + on nemotron, then
+    # `helm upgrade` to swap which model holds the GPU.
+    - name: "gemma4"
+      enabled: false
+      repository: "ghcr.io/aeon-7/vllm-spark-gemma4-nvfp4"
+      tag: "latest"
+      modelURL: "AEON-7/Gemma-4-26B-A4B-it-Uncensored-NVFP4"
+      replicaCount: 1
+      requestGPU: 1
+      requestCPU: 4
+      requestMemory: "40Gi"
+      shmSize: "32Gi"
+
+      enableTool: true
+      toolCallParser: "gemma4"
+
+      vllmConfig:
+        enablePrefixCaching: true
+        enableChunkedPrefill: true
+        maxModelLen: "262000"
+        maxNumSeqs: 128
+        gpuMemoryUtilization: 0.60
+        dtype: "auto"
+        tensorParallelSize: 1
+        extraArgs:
+          - "--served-model-name"
+          - "gemma4-26b-uncensored"
+          - "--load-format"
+          - "safetensors"
+          - "--max-num-batched-tokens"
+          - "131072"
+          - "--kv-cache-dtype"
+          - "fp8"
+          - "--trust-remote-code"
+          - "--reasoning-parser"
+          - "gemma4"
+
+      # gemma4.py source patch, same as the current gemma4-deployment.yaml.
+      extraVolumes:
+        - name: gemma4-patch
+          hostPath:
+            path: /home/bharath/workspace/dgx-spark-vllm-gemma4-26b-uncensored/patches
+            type: Directory
+      extraVolumeMounts:
+        - name: gemma4-patch
+          mountPath: /usr/local/lib/python3.12/dist-packages/vllm/model_executor/models/gemma4.py
+          subPath: gemma4_patched.py
+
+      # No lmcacheConfig for gemma4: custom image, LMCache support unverified.
+
+# Reuse the on-disk HuggingFace cache instead of downloading into a PVC.
+# Creates a hostPath PersistentVolume + shared claim; mounted into every model
+# pod at /data/shared-pvc-storage, which the chart sets as HF_HOME.
+sharedPvcStorage:
+  enabled: true
+  hostPath: "/home/bharath/.cache/huggingface"
+  size: "500Gi"
+  accessModes:
+    - ReadWriteOnce
+  # Non-empty, non-existent class name: forces static binding to the hostPath PV
+  # above and stops the default-StorageClass webhook from hijacking the PVC into
+  # dynamic nfs provisioning (which fails with "storageClassName does not match").
+  storageClass: "manual"
+
+routerSpec:
+  enableRouter: true
+  routingLogic: "roundrobin"
+  # Upstream lmcache/lmstack-router is amd64-only; this is our arm64 rebuild
+  # (production-stack docker/Dockerfile, no optional extras) in the in-cluster
+  # registry. See production-stack/README.md for the build recipe.
+  repository: "registry.krishb.in/vllm/lmstack-router"
+  tag: "0.1.12-arm64"
+  imagePullSecrets:
+    - name: registry-krishb-creds
+  ingress:
+    enabled: true
+    className: "haproxy"
+    annotations:
+      haproxy.org/timeout-http-request: "600s"
+      haproxy.org/timeout-tunnel: "3600s"
+      haproxy.org/timeout-http-keep-alive: "600s"
+    hosts:
+      - host: nemotron.local
+        paths:
+          - path: /
+            pathType: Prefix
+      - host: nemo35-lightning.krishb.in
+        paths:
+          - path: /
+            pathType: Prefix
+      - host: gemma4.local
+        paths:
+          - path: /
+            pathType: Prefix
+      - host: gemma4.krishb.in
+        paths:
+          - path: /
+            pathType: Prefix
+      - host: vllm.krishb.in
+        paths:
+          - path: /
+            pathType: Prefix

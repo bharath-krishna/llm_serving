@@ -1,0 +1,122 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-gemma4
+  namespace: vllm
+  labels:
+    app: vllm-gemma4
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vllm-gemma4
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: vllm-gemma4
+    spec:
+      runtimeClassName: nvidia
+      hostIPC: true
+      containers:
+        - name: vllm
+          image: ghcr.io/aeon-7/vllm-spark-gemma4-nvfp4:latest
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              exec vllm serve AEON-7/Gemma-4-26B-A4B-it-Uncensored-NVFP4 \
+                --served-model-name gemma4-26b-uncensored \
+                --host 0.0.0.0 --port 8088 \
+                --tensor-parallel-size 1 \
+                --dtype auto \
+                --load-format safetensors \
+                --max-model-len 262000 \
+                --max-num-seqs 128 \
+                --max-num-batched-tokens 131072 \
+                --gpu-memory-utilization 0.60 \
+                --kv-cache-dtype fp8 \
+                --enable-chunked-prefill \
+                --enable-prefix-caching \
+                --trust-remote-code \
+                --enable-auto-tool-choice \
+                --tool-call-parser gemma4 \
+                --reasoning-parser gemma4
+          ports:
+            - containerPort: 8088
+              name: http
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+            requests:
+              nvidia.com/gpu: "1"
+          volumeMounts:
+            - mountPath: /root/.cache/huggingface
+              name: huggingface-cache
+            - mountPath: /usr/local/lib/python3.12/dist-packages/vllm/model_executor/models/gemma4.py
+              name: gemma4-patch
+              subPath: gemma4_patched.py
+            - mountPath: /dev/shm
+              name: dshm
+      volumes:
+        - name: huggingface-cache
+          hostPath:
+            path: /home/bharath/.cache/huggingface
+            type: DirectoryOrCreate
+        - name: gemma4-patch
+          hostPath:
+            path: /home/bharath/workspace/dgx-spark-vllm-gemma4-26b-uncensored/patches
+            type: Directory
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 32Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-gemma4
+  namespace: vllm
+  labels:
+    app: vllm-gemma4
+spec:
+  selector:
+    app: vllm-gemma4
+  ports:
+    - port: 8088
+      targetPort: 8088
+      name: http
+  type: ClusterIP
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: vllm-gemma4
+  namespace: vllm
+  annotations:
+    haproxy.org/timeout-http-request: "600s"
+    haproxy.org/timeout-tunnel: "3600s"
+    haproxy.org/timeout-http-keep-alive: "600s"
+spec:
+  ingressClassName: haproxy
+  rules:
+    - host: gemma4.local
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: vllm-gemma4
+                port:
+                  number: 8088
+    - host: gemma4.krishb.in
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: vllm-gemma4
+                port:
+                  number: 8088

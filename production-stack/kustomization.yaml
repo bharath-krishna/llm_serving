@@ -1,0 +1,14 @@
+# Helm post-renderer overlay. Not applied directly — post-render.sh copies this
+# file, the patch, and Helm's rendered output into a temp dir and runs
+# `kubectl kustomize` over it. See production-stack/README.md.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - rendered.yaml
+patches:
+  - path: patch-lmcache-sidecar.yaml
+    target:
+      group: apps
+      version: v1
+      kind: Deployment
+      name: vllm-nemotron-deployment-vllm
