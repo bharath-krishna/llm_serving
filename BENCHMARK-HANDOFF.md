@@ -1,14 +1,14 @@
 # vLLM concurrent-user benchmark — handoff
 
-**Date:** 2026-08-28
+**Date:** 2026-08-28 (updated after instrumented run #2, 09:27–09:45 PDT)
 **Node:** `spark-45f7` — NVIDIA DGX Spark (GB10, arm64, single iGPU, 128 GB unified memory)
 **Goal:** measure how many concurrent users the vLLM deployment of NemotronH can serve
 before latency SLOs break.
 
-**Status: BLOCKED. The benchmark host hard-crashes under GPU load — 4+ times in 24 h,
-independent of memory pressure. Believed to be a GPU/SoC firmware/driver fault, not a
-configuration problem. The benchmark needs to be re-run on different hardware, or this
-unit needs a firmware/driver fix + NVIDIA support case first.**
+**Status: capacity question ANSWERED (knee = 8 users). Crash still not root-caused, but
+now properly characterised: it is an instant hardware-level reset with verified-zero
+kernel output. Session 2 added real instrumentation and one new data point (N=12).
+Paused by user; next step is the clock-lock experiment in §10.**
 
 ---
 
@@ -16,27 +16,25 @@ unit needs a firmware/driver fix + NVIDIA support case first.**
 
 - vLLM serves `nemotron-3.5-lightning` (NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4,
   hybrid Mamba2+attention) on a single GB10.
-- We built a clean concurrency sweep (`bench/conc_sweep.sh`) using `vllm bench serve`,
-  driven from a separate pod, with a host-side memory guard.
-- **Results we DID get (before the crash):** concurrency 1, 4, 8 — see §5.
-  - Single user: **2.8 s TTFT** on a 16k-token prompt (prefill-bound), 12 ms/token decode.
-  - 4 users: 171 tok/s aggregate, TTFT p99 1.1 s, 22 ms/token.
-  - 8 users: 228 tok/s aggregate, TTFT p99 1.3 s, 33 ms/token, e2e p50 20.7 s.
-  - Throughput is already flattening by 8 users; TPOT rising linearly.
-- **Concurrency 16 hard-crashed the node ~40 s in.** Memory was flat at ~67 GB
-  available the entire time; the memory guard never fired. Same for the two earlier
-  crashes today.
-- The scratchpad holding the live run logs was on tmpfs and was wiped by the reboot.
-  Everything recoverable is in this doc and in `bench/`.
+- Concurrency sweep via `vllm bench serve` from a separate pod (`bench/conc_sweep.sh`,
+  resume variant `bench/conc_sweep_resume.sh`).
+- **Results: concurrency 1, 4, 8, 12 — see §5.**
+  - Throughput peaks at **N=8 (228 out tok/s)** and then **COLLAPSES to 125 tok/s at N=12**
+    — it does not merely flatten.
+  - At N=12 TTFT p99 is **30.1 s** and e2e p50 is **58.4 s**: unusable for a coding agent.
+  - **Capacity against a TTFT-p99 < 5 s SLO is 8 concurrent long-context users.**
+- **Concurrency 16 crashes the node, reproducibly** — twice now (~42 s in on 08-28 07:58
+  run, **102 s in** on the instrumented 09:39 run).
+- Levels 16/24/32/48/64 were never collected and are **past the usable knee anyway** —
+  there is little benchmark value in chasing them on this config (see §6).
 
-**Recommended next step:** do not keep hammering this box. Either (a) move the model +
-sweep to a cloud GB200/H100 or a second Spark, or (b) get this unit onto a newer
-DGX Spark BSP / NVIDIA driver and open a support case with the crash signature in §3,
-then re-run.
+**Recommended next step:** run the clock-lock experiment (§10). It is ~5 minutes and is the
+single test that discriminates the leading hypothesis. Then, separately, do the
+LMCache-off re-sweep (§7c #1) — that is the change likely to fix the N=12 collapse.
 
 ---
 
-## 2. Environment / constraints (carry these to the new machine)
+## 2. Environment / constraints (carry these to a new machine)
 
 | thing | value |
 |---|---|
@@ -48,6 +46,7 @@ then re-run.
 | model arch | NemotronH hybrid: Mamba2 SSM layers + periodic attention layers, MoE (A3B active) |
 | quant | NVFP4 weights, run through Marlin (no native FP4 on sm_121) |
 | k8s | single-node, namespace `vllm`, haproxy ingress, in-cluster registry `registry.krishb.in` |
+| host net | **WiFi only** (`wlP9s9`, mt7925e). `enP7s7` (Realtek 5GbE) is DOWN / NO-CARRIER |
 
 **Hard model/serving constraints (do not "fix" these without understanding why):**
 
@@ -58,7 +57,7 @@ then re-run.
   of the block size).
 - **`--max-num-batched-tokens` must be in `[2128, 4256)`** when LMCache is attached to a
   Mamba-hybrid model. It is currently **2192**. This is the single biggest throughput
-  limiter (see §6).
+  limiter and the prime suspect for the N=12 collapse (see §6).
 - LMCache for this hybrid model **requires** `LMCacheMPConnector` (not `LMCacheConnectorV1`)
   and node-local CUDA-IPC / `/dev/shm` transport — no remote `lm://` server is possible.
   Both pods run `hostIPC: true` with **no** `/dev/shm` emptyDir.
@@ -69,65 +68,132 @@ then re-run.
 
 ---
 
-## 3. The crash — full evidence
+## 3. The crash — evidence from sessions 1 and 2
 
-### Boot history (this is `journalctl --list-boots`, PDT)
+### Boot history (`journalctl --list-boots`, PDT)
 
 ```
- -9  Thu 08-27 07:26 → 08:36   (70 min)
- -8  Thu 08-27 18:15 → 20:51
- -7  Thu 08-27 20:54 → Fri 00:08
- -6  Fri 00:15:31 → 00:22:15   (7 min)
- -5  Fri 00:23:13 → 00:32:35   (9 min)
- -4  Fri 00:33:25 → 00:34:07   (42 SECONDS)
- -3  Fri 00:35:06 → 00:49:41
- -2  Fri 06:29:18 → 06:57:25   (28 min — crash #1 today, during opencode use)
- -1  Fri 07:04:18 → 08:12:44   (68 min — crash #3, during THIS benchmark, at concurrency 16)
-  0  Fri 09:02:49 → ...        (current)
+ -7  Fri 00:15:31 → 00:22:15   (7 min)
+ -6  Fri 00:23:13 → 00:32:35   (9 min)
+ -5  Fri 00:33:25 → 00:34:07   (42 SECONDS — cold, idle. See "why this matters" below)
+ -4  Fri 00:35:06 → 00:49:41
+ -3  Fri 00:52:36 → 01:29:04
+ -2  Fri 06:29:18 → 06:57:25   (28 min — crash during opencode use)
+ -1  Fri 07:04:18 → 08:12:44   (68 min — crash #3, sweep session 1, at concurrency 16)
+  0  Fri 09:02:49 → 09:41:24   (39 min — crash #4, sweep session 2, at concurrency 16)
 ```
 
 ### Signature (identical every time)
 
-- Journal / kernel log **ends mid-line** on a routine entry (kubelet or containerd), then
-  the machine is simply gone. `/var/log/kern.log` has **nothing** in the seconds before
-  the reset.
+- Journal / kernel log **ends mid-line** on a routine entry, then the machine is gone.
 - **No** `NVRM: Xid`, **no** kernel panic / oops, **no** `oom-kill`, **no** thermal event,
   **no** MCE — anywhere, in any boot.
 - Reboot takes ~3 min and also bounces the k8s control plane.
-- `watchdog: Hard watchdog permanently disabled` on this kernel — so the SoC cannot even
-  produce a clean panic/kdump; it just resets.
 
-### Crash #3 (this benchmark) specifics
+### Why there was never any evidence: the box is instrumentation-blind
 
-- Started sweep 07:58 PDT. Completed concurrency **1, 4, 8** cleanly.
-- Concurrency **16** began 08:12:02 PDT; node died **08:12:44 PDT** (~42 s in — right as
-  16 concurrent ~16k-token prefills hit the GPU together).
-- Host memory the entire run: **~67.5 GB available, dead flat** (146 guard samples, min
-  67,257 MB, floor was 13,000 MB — never close). vLLM KV cap (10 GiB) held perfectly.
-- `ollama` was **stopped** (`systemctl disable --now ollama`) for this run — ruled out.
-- The desktop GDM/Xorg session was still on the GPU (`Xorg` 18 MiB, `gnome-shell` 6 MiB) —
-  trivial, but ideally kill it too (`systemctl set-default multi-user.target`).
+This was the key discovery of session 2. The absence of error records is **not** evidence
+of no hardware fault — **there is no mechanism on this unit capable of recording one:**
+
+| channel | state | consequence |
+|---|---|---|
+| ACPI `HEST` / `BERT` | **absent** from `/sys/firmware/acpi/tables/` | no APEI/GHES; firmware cannot report hardware errors to the kernel, and no boot error record survives a reset |
+| EDAC | no `mc0` instance, no edac modules loaded | no DRAM ECC reporting at all |
+| GPU ECC / retired pages / power limit | all `N/A` in `nvidia-smi -q` | GB10 exposes no ECC or power-cap telemetry |
+| Hard watchdog | `permanently disabled` on this kernel | SoC cannot produce a clean panic |
+| kdump | `crashkernel=1G-:0M` (from `/etc/default/grub.d/kdump-tools.cfg`) | 0 MB reserved — kdump disabled |
+| Tegra CBB (SoC fabric errors) | `initcall_blacklist=tegra234_cbb_init` (from **NVIDIA's own** `/etc/default/grub.d/nvidia-spark-initcall-bl.cfg`), **and** the module is absent from the modules tree despite `CONFIG_SOC_TEGRA_CBB=m` | interconnect / bus-timeout / illegal-access faults are silently unreportable. Cannot be re-enabled without a custom kernel. |
+
+The CBB blacklist is shipped by NVIDIA's DGX Spark BSP, so this blindness is
+vendor-default, not a local misconfiguration.
+
+### Ruled OUT by direct measurement (session 2)
+
+- **Memory pressure.** `MemAvailable` flat at **67.1 GB** for the entire run, right up to
+  the last synced sample. PSI memory `avg10 = 0.00` throughout. The 10 GiB KV cap held.
+- **DRAM / MCE / extlog errors.** `ras-mc-ctl --summary`: *"No Memory errors. No Extlog
+  errors. No MCE errors."*
+- **PCIe faults.** rasdaemon shows 329 corrected AER events, but every one is `RxErr` on
+  `0000:00:00.0` and `0002:00:00.0` — **empty NVIDIA root ports** with nothing enumerated
+  behind them (benign link-training noise). The **GPU (`000f:01:00.0`) and NVMe have zero
+  AER errors**, and there are **no uncorrectable or fatal AER errors on any device**.
+- **Kernel-side fault paths.** `/sys/fs/pstore` is empty — no panic was ever recorded.
+- **ollama.** Disabled (`systemctl disable --now ollama`) for both sweep runs.
+
+### The decisive new evidence: netconsole silence
+
+Session 2 armed netconsole (kernel printk shipped over UDP to a laptop, so it is
+*transmitted* rather than written — it survives a reset that discards the page cache).
+
+- netconsole was **verified working**: manual `echo ... > /dev/kmsg` test messages arrived
+  at the collector (`bench/crash-evidence-2026-08-28/netconsole.log`).
+- At the crash it delivered **zero bytes**.
+
+The kernel printed **nothing at all** before the reset. That positively excludes kernel
+panic, OOM kill, GPU driver Xid, and soft/hard lockup — all of which print first. The CPU
+never got the opportunity to emit a single character. This is an **instant hardware-level
+reset** (power delivery, PMIC, or SoC-level), not a software fault path.
+
+### Crash #4 telemetry (the instrumented one)
+
+Sampled at 1 Hz (system) and 10 Hz (GPU), every sample written `O_SYNC` so the page cache
+could not swallow it. Level 16 began 09:39:42.175; **last telemetry sample 09:41:24.549
+PDT ⇒ 102.4 s in**, with 8 of 96 requests complete.
+
+Final seconds (10 Hz):
+
+```
+09:41:13  gpu=77C  p=50.9W  sm=2463 MHz  throttle=0x0
+09:41:16  gpu=82C  p=79.5W  sm=2385 MHz  throttle=0x0
+09:41:18  gpu=78C  p=50.8W  sm=2463 MHz  throttle=0x0
+09:41:20  gpu=83C  p=78.8W  sm=2385 MHz  throttle=0x0
+09:41:22  gpu=83C  p=76.5W  sm=2359 MHz  throttle=0x20
+09:41:23  gpu=85C  p=73.6W  sm=2405 MHz  throttle=0x20
+09:41:24  gpu=80C  p=74.1W  sm=2366 MHz  throttle=0x0   ← last sample, then reset
+```
+
+Two features stand out:
+
+1. **Power sawtooths 50 ↔ 80 W on a ~3 s cycle** — a ~60% swing, driven by chunked prefill
+   alternating with decode. At N=16 more prefills coincide, so the transients get larger.
+2. **Chronic thermal throttling.** Across 5,530 samples, 465 (**8.4%**) carry a nonzero
+   `clocks_event_reasons`, starting 09:34:50 (during level 12):
+
+   | flag | meaning | samples |
+   |---|---|---|
+   | `0x20` | SwThermalSlowdown | 410 |
+   | `0x48` | **HwThermalSlowdown + HwSlowdown** | 25 |
+   | `0x68` | HwThermal + SwThermal + HwSlowdown | 20 |
+   | `0x04` | SwPowerCap | 10 |
+
+   45 samples carry the **hardware** thermal-slowdown bit — the silicon's own emergency net.
+
+Thermal envelope: GPU peaks **85 °C**; host SoC zones peak **96 °C** against a **104 °C**
+critical trip. NVMe 60 °C.
+
+**Why temperature is not a sufficient explanation:** at the instant of death the GPU was
+*cooling* (85 → 80 °C) with throttle cleared, temps plateaued rather than ran away, and
+boot `-5` died **42 seconds after boot** while cold and idle. Heat is a real stress factor
+that erodes margin; it does not by itself explain the resets.
 
 ### Interpretation
 
-Memory-independent, load-triggered, unlogged instant reset on a GB10, recurring, with a
-42-second boot-to-crash in the history — this is a **hardware / firmware / GPU-driver
-fault**, not a k8s or vLLM resource issue. The earlier hypothesis (unified-memory
-exhaustion → driver OOM) was disproved by this run: caps applied, memory flat, still
-crashed. Sustained/bursty GPU compute on this unit wedges the memory fabric or the GPU
-MMU and the CPU can't recover.
+Memory-independent, load-triggered, reproducible-at-N=16, with **zero kernel output on a
+verified-working netconsole** — this is a hardware / firmware fault, not a k8s or vLLM
+resource issue. Leading hypothesis: **transient power-delivery collapse** under the
+repetitive 50↔80 W prefill/decode sawtooth, with sustained ~95 °C SoC temperature reducing
+margin. GB10 exposes no power limit at all (`Current/Min/Max Power Limit: N/A`), so the
+only lever available is clock capping — see §10.
 
 ### Contributing environment problems worth cleaning up regardless
 
-- `ollama.service` autostarts and grabs the full 121.7 GiB as "VRAM" with
-  `OLLAMA_MAX_LOADED_MODELS=0`. Keep it disabled while vLLM owns the GPU.
-- Desktop session on the GPU (see above).
-- ~9 pods in permanent CrashLoopBackOff — `dify-release-redis-*` at **37,000+ restarts**,
-  `wandb-controller` at 37k, `banking/*` on ImagePullBackOff. Constant churn; delete them.
-- **Security:** `sshd` is exposed with password auth and taking root brute-force attempts
-  from the internet (`Failed password for root from 91.92.47.123` seen seconds before the
-  crash — coincidental, but the exposure is real). Lock SSH down (key-only, no root,
-  firewall) independent of the GPU issue.
+- Desktop session still on the GPU (`systemctl set-default multi-user.target` to drop it).
+- SoC at 96 °C under load — improve airflow / ambient.
+- ~9 pods in permanent CrashLoopBackOff — `dify-release-redis-*` and `wandb-controller` at
+  37,000+ restarts, `banking/*` on ImagePullBackOff. Constant containerd churn adds noise
+  to crash correlation.
+- **Security:** `sshd` exposed with password auth, taking root brute-force attempts from
+  the internet. Lock it down (key-only, no root, firewall) independent of the GPU issue.
 
 ---
 
@@ -201,20 +267,23 @@ no pod `memory` limits.
 
 ---
 
-## 5. Results collected (concurrency 1, 4, 8)
+## 5. Results collected (concurrency 1, 4, 8, 12)
 
 Workload per request: prompt 8k–24k tokens (mean 16k, `--random-range-ratio 0.5`),
 600 output tokens (`--ignore-eos`), plus a shared 2,128-token cached prefix.
-`--request-rate inf` so exactly N requests are always in flight. 48 prompts per level.
+`--request-rate inf` so exactly N requests are always in flight.
+N=1/4/8 used 48 prompts; N=12 used 72.
 
 | concurrency | dur (s) | req/s | **out tok/s** | total tok/s | TTFT p50 | TTFT p90 | TTFT p99 | TPOT p50 | TPOT p99 | ITL p99 | e2e p50 | e2e p99 |
 |---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| **1**  | 500.4 | 0.10 | 59.2  | 1851 | 2796 ms | 3899 ms | 4184 ms | 12.3 ms | 12.6 ms | 37 ms  | 10.5 s | 14.2 s |
-| **4**  | 173.4 | 0.28 | 170.8 | 5341 | 477 ms  | 629 ms  | 1110 ms | 22.3 ms | 23.5 ms | 66 ms  | 14.2 s | 20.3 s |
-| **8**  | 130.0 | 0.37 | 227.9 | 7126 | 486 ms  | 877 ms  | 1271 ms | 33.4 ms | 34.9 ms | 133 ms | 20.7 s | 29.7 s |
-| **16** | — | — | — | — | — | — | — | — | — | — | — | **NODE CRASH ~40 s in** |
+| **1**  | 500.4 | 0.096 | 59.2  | 1851 | 2796 ms | 3899 ms | 4184 ms | 12.3 ms | 12.6 ms | 37 ms  | 10.5 s | 14.2 s |
+| **4**  | 173.4 | 0.277 | 170.8 | 5341 | 477 ms  | 629 ms  | 1110 ms | 22.3 ms | 23.5 ms | 66 ms  | 14.2 s | 20.3 s |
+| **8**  | 130.0 | 0.369 | **227.9** | 7126 | 486 ms | 877 ms | 1271 ms | 33.4 ms | 34.9 ms | 133 ms | 20.7 s | 29.7 s |
+| **12** | 346.0 | 0.208 | **125.2** ↓ | 3996 | 3607 ms | 13085 ms | **30121 ms** | 87.6 ms | 111.0 ms | 451 ms | **58.4 s** | 95.5 s |
+| **16** | — | — | — | — | — | — | — | — | — | — | — | **NODE CRASH 102 s in** |
 
-Raw `vllm bench serve` blocks:
+Raw `vllm bench serve` blocks for 1/4/8 (session 1, transcribed — the tmpfs logs were lost
+in that reboot):
 
 ```
 ==== concurrency 1 ====
@@ -246,46 +315,52 @@ Mean ITL: 35.68 ms      P50: 31.12     P90: 41.84     P99: 132.77
 Mean E2EL: 20781.69 ms  P50: 20745.58  P90: 27219.96  P99: 29742.35
 ```
 
+N=12 raw JSON/log are preserved at `bench/crash-evidence-2026-08-28/conc-12.{json,log}`.
+
 ---
 
-## 6. Preliminary analysis (incomplete — no data past N=8)
+## 6. Analysis
+
+**Capacity answer: 8 concurrent long-context users.** Against a coding-agent SLO of
+TTFT p99 < 5 s and TPOT p50 < 80 ms, N=8 passes (1.27 s / 33 ms) and N=12 fails badly
+(30.1 s / 87.6 ms).
+
+**Throughput does not merely flatten past the knee — it collapses.**
+- N=1 → N=4: 59 → 171 out tok/s (2.9×, near-linear)
+- N=4 → N=8: 171 → 228 (+33%) — knee
+- N=8 → N=12: 228 → **125 (−45%)** — collapse
+
+A 45% *drop* in aggregate throughput while adding load means the scheduler is thrashing,
+not saturating. KV capacity is not the cause: 12 requests × ≤24k tokens ≈ 288k tokens
+against a 3,260,912-token pool. The cause is almost certainly prefill starvation —
+12 concurrent ~16k-token prefills sharing a **2,192-token/step** budget, interleaved with
+decode steps that must run the whole batch. TTFT p90 jumps 877 ms → 13.1 s across that
+step, which is the fingerprint of prefill queueing.
 
 **The single-user 2.8 s TTFT is real** (mean ≈ median across all 48 requests, not a warmup
-artifact). It is pure prefill of a ~16k-token prompt at `--max-num-batched-tokens 2192`
-(~7–8 chunked-prefill steps at ~380 ms each). At N≥4 the scheduler interleaves new
-prefills with running decodes, so *observed* per-request TTFT drops to ~0.5 s while the
-prefill work is amortised — but total prefill capacity is fixed.
-
-**Throughput is saturating early:**
-- N=1 → N=4: output tok/s 59 → 171 (2.9×, near-linear)
-- N=4 → N=8: 171 → 228 (only +33%)
-- The knee is around **4–8 concurrent long-context users** for this config.
-
-**TPOT climbs linearly with batch size** (12 → 22 → 33 ms) because every decode step runs
-the whole batch. At N=8, e2e for a 600-token completion is already ~21 s (p50).
+artifact) — pure prefill of a ~16k prompt at 2192 tokens/step (~7–8 chunked steps).
 
 **Two ceilings in the current config:**
-1. `--max-num-seqs 32` — max 32 requests decoding at once; extras queue.
-2. `--max-num-batched-tokens 2192` — the real limiter. All concurrent prefills share a
-   2,192-token/step budget. This is pinned into `[2128, 4256)` *only because LMCache is
-   attached*. Without LMCache you could set it to 8k–16k and prefill several users per
-   step, roughly 4–8× the prefill throughput.
+1. `--max-num-seqs 32` — max 32 requests decoding at once.
+2. `--max-num-batched-tokens 2192` — **the real limiter**, and pinned into `[2128, 4256)`
+   *only because LMCache is attached*. Without LMCache this can be 8k–16k, prefilling
+   several users per step: roughly 4–8× the prefill throughput.
 
-**LMCache is barely helping this workload.** During the earlier opencode session the
-engine logged `Prefix cache hit rate: 96%` (vLLM local) vs `External prefix cache hit
-rate: 2%` (LMCache). vLLM's own GPU prefix cache serves nearly all reuse for a small
-number of users; LMCache only pays off under heavy multi-user KV eviction. Given it also
-forces the tiny `max-num-batched-tokens`, **strongly consider running WITHOUT LMCache**
-for the multi-user test and comparing.
+**LMCache is barely helping this workload.** During an earlier opencode session the engine
+logged `Prefix cache hit rate: 96%` (vLLM local) vs `External prefix cache hit rate: 2%`
+(LMCache). vLLM's own GPU prefix cache serves nearly all reuse at low user counts; LMCache
+only pays off under heavy multi-user KV eviction. Since it also forces the tiny
+`max-num-batched-tokens` that produces the N=12 collapse, **the LMCache-off comparison
+(§7c #1) is now the highest-value benchmark change.**
 
 ---
 
-## 7. What to run on the new machine
+## 7. What to run
 
 ### 7a. Bring up the model + bench pod
 
 ```bash
-kubectl apply -f nemotron-deployment.yaml      # or your equivalent
+kubectl apply -f nemotron-deployment.yaml
 kubectl apply -f lmcache-deployment.yaml       # optional — see §6, consider skipping
 kubectl -n vllm rollout status deploy/vllm-nemotron --timeout=600s
 
@@ -293,68 +368,114 @@ kubectl apply -f bench/bench-pod.yaml
 kubectl -n vllm wait --for=condition=Ready pod/vllm-bench --timeout=120s
 ```
 
-### 7b. Run the sweep
+### 7b. Run the sweep (with monitoring — see §8)
 
 ```bash
-# from the k8s host (or anywhere kubectl works; the memguard only matters on the host)
-sudo systemctl disable --now ollama          # if present
-bash bench/run_sweep.sh                       # ~30–50 min; writes bench/bench_results/
+kubectl -n vllm cp bench/conc_sweep_resume.sh vllm-bench:/root/conc_sweep_resume.sh
+kubectl -n vllm exec vllm-bench -- chmod +x /root/conc_sweep_resume.sh
+kubectl -n vllm exec vllm-bench -- bash -lc '/root/conc_sweep_resume.sh'
 ```
 
-Or manually inside the pod:
-```bash
-kubectl -n vllm cp bench/conc_sweep.sh vllm-bench:/root/conc_sweep.sh
-kubectl -n vllm exec -it vllm-bench -- bash -lc 'chmod +x /root/conc_sweep.sh && /root/conc_sweep.sh'
-kubectl -n vllm cp vllm-bench:/results ./bench_results
-```
+Results land on a **hostPath** (`/var/lib/vllm-bench-results`), so they survive a reset —
+unlike session 1, whose tmpfs logs were lost. `MARKERS.txt` is written with
+`dd oflag=dsync` before each level, so a crash cannot erase which level was running.
 
-### 7c. Recommended additional runs (once the box is stable)
+### 7c. Recommended additional runs
 
 1. **Same sweep, LMCache OFF, `--max-num-batched-tokens 16384`** — strip
    `--kv-transfer-config` from the vLLM args and scale `deploy/lmcache` to 0. This is the
-   apples-to-apples "does LMCache help or hurt multi-user" test and should massively
-   improve prefill/TTFT.
-2. **Raise `--max-num-seqs` to 64–128** and re-sweep to 128 concurrency.
+   apples-to-apples "does LMCache help or hurt multi-user" test and is the most likely fix
+   for the N=12 collapse. **Highest-value remaining benchmark work.**
+2. **Raise `--max-num-seqs` to 64–128** and re-sweep — only meaningful after #1.
 3. **Short-chat profile** for comparison: `--dataset-name sharegpt --sharegpt-output-len
    300`, sweep concurrency to 128.
-4. Push `--kv-cache-memory-bytes` up (20–40 GiB) once you trust the hardware — with more
-   KV pool, more long contexts fit and `--max-num-seqs` becomes the binding limit.
+4. Push `--kv-cache-memory-bytes` up (20–40 GiB) once the hardware is trusted.
 
 ### 7d. Reading the output
 
-`bench_results/pod-results/summary.csv`, one row per concurrency level. **Capacity = the
-highest concurrency where `ttft_p99_ms` and `tpot_p50_ms` are still under your SLO** and
+`/var/lib/vllm-bench-results/summary.csv`, one row per concurrency level. **Capacity = the
+highest concurrency where `ttft_p99_ms` and `tpot_p50_ms` are still under SLO** and
 `out_tok_per_s` is still rising. Suggested SLOs for a coding agent: TTFT p99 < 5000 ms,
-TPOT p50 < 80 ms. Above the knee, throughput plateaus and latency grows linearly.
+TPOT p50 < 80 ms.
 
 ---
 
-## 8. Files
+## 8. Monitoring / forensics tooling (built in session 2)
+
+All under `bench/`. Everything writes `O_SYNC`, because an instant SoC reset discards the
+page cache — that is why session 1's logs "ended mid-line" with nothing useful.
+
+| file | what |
+|---|---|
+| `bench/spark-forensics-setup.sh` | **run as root on the node.** Dumps pstore + rasdaemon DB + the tail of every crashed boot; arms netconsole at a collector IP; sets journald `SyncIntervalSec=1s`; installs `crashmon.service`. Idempotent. Edit `MAC_IP` before use. |
+| `bench/crashmon.py` | 1 Hz system sampler → `sysmon.csv`: GPU temp/util/clock/power/throttle, MemAvailable, Committed_AS, Dirty, **PSI cpu/mem/io**, loadavg, NVMe temp, all 7 thermal zones. Installed as `crashmon.service` (auto-restarts after a crash-reboot). |
+| `bench/gpumon.py` | 10 Hz GPU sampler → `gpu10hz.csv`. One long-lived `nvidia-smi -lms 100`. Needed to see the 3 s power sawtooth that 1 Hz averages away. **Not** a service — restart manually via `start-telemetry.sh` after a reboot. |
+| `bench/start-telemetry.sh` | launcher for `gpumon.py`. Kept as a file specifically so the ssh command line never contains the `pkill` pattern (an inline `pkill -f gpumon.py` matches — and kills — its own shell). |
+| `bench/conc_sweep_resume.sh` | sweep starting at N=12, with `dd oflag=dsync` level markers. |
+
+**Collector side (netconsole):** `nc -u -l 6666 > netconsole.log` on the machine named in
+`MAC_IP`. Verify it works before trusting silence:
+`sudo bash -c "echo NETCONSOLE-TEST > /dev/kmsg"` should appear in the log.
+netconsole did attach over WiFi (mt7925e) despite mac80211's usual lack of netpoll support.
+Plugging `enP7s7` (5GbE) in would make it more reliable.
+
+**Currently left running on the node:** `crashmon.service` (1 Hz, cheap). To stop it:
+`sudo systemctl disable --now crashmon`. `gpumon` is stopped; restart with
+`ssh spark 'bash /home/bharath/start-telemetry.sh'` before the next run.
+
+---
+
+## 9. Files
 
 | path | what |
 |---|---|
 | `BENCHMARK-HANDOFF.md` | this doc |
 | `bench/bench-pod.yaml` | load-generator pod (same image, no GPU, HF cache mounted RO) |
-| `bench/conc_sweep.sh` | the sweep — runs inside the bench pod |
+| `bench/conc_sweep.sh` | original full sweep (levels 1…64) |
+| `bench/conc_sweep_resume.sh` | resume sweep from N=12, with synced markers |
 | `bench/run_sweep.sh` | host orchestrator: memory guard + launch + collect |
+| `bench/crashmon.py`, `bench/gpumon.py`, `bench/start-telemetry.sh`, `bench/spark-forensics-setup.sh` | §8 tooling |
+| `bench/crash-evidence-2026-08-28/` | **crash #4 evidence** — see below |
 | `nemotron-deployment.yaml` | vLLM engine (repo root) — has the 08-28 caps |
 | `lmcache-deployment.yaml` | LMCache MP server (repo root) — has the 08-28 caps |
-| `lmcache-benchmark-report.md` | earlier A/B (LMCache on vs off) full report + the first crash write-up |
-| `bench_config.json` | config for the OTHER tool (`lmcache bench engine`), unrelated to this sweep |
-| `bench_config.UNSAFE-crashed-the-node.json` | quarantined config that caused crash #? on 08-27 |
+| `lmcache-benchmark-report.md` | earlier A/B (LMCache on vs off) full report + first crash write-up |
+| `bench_config.json` | config for the OTHER tool (`lmcache bench engine`), unrelated |
+| `bench_config.UNSAFE-crashed-the-node.json` | quarantined config that caused an 08-27 crash |
 
-Live run artifacts (guard.log, sweep.out, conc-16.log) were on tmpfs and lost in the
-reboot. conc-1/4/8 raw numbers are transcribed in §5.
+`bench/crash-evidence-2026-08-28/` contains: `sysmon.csv` (1 Hz, both boots),
+`gpu10hz.csv` (10 Hz, 5,530 samples through the crash), `MARKERS.txt` (level timings),
+`bench-summary.csv`, `conc-12.{json,log}`, `netconsole.log` (the verified-working,
+crash-silent capture), `ras-summary.txt`.
 
 ---
 
-## 9. Open questions for whoever picks this up
+## 10. Open questions & the next experiment
 
-1. Is the GB10 lockup reproducible on a second Spark, or specific to this unit? (If
-   unit-specific → RMA. If model-wide → NVIDIA driver/BSP bug, needs a support case with
-   the §3 signature.)
-2. Does a newer DGX Spark BSP / NVIDIA driver (> 580.173.02) fix it?
-3. With LMCache removed and `max-num-batched-tokens` raised, where does the real
-   concurrency knee land?
-4. Power/thermal: the crashes have no thermal log entry, but rule it out with
-   `nvidia-smi -q -l 1` logging + a lower power cap during the next attempt.
+**Do this first — the clock-lock experiment (~5 min).** It is the one test that
+discriminates the leading hypothesis, and GB10 exposes no power limit, so clocks are the
+only lever:
+
+```bash
+ssh spark 'bash /home/bharath/start-telemetry.sh'        # re-arm 10 Hz sampler
+ssh -t spark 'sudo nvidia-smi -lgc 0,1800'               # cap SM clock (was 2411–2470)
+# then run ONLY level 16 (edit LEVELS=(16) in conc_sweep_resume.sh)
+ssh -t spark 'sudo nvidia-smi -rgc'                      # restore afterwards
+```
+
+- **Survives N=16 capped** ⇒ confirms transient power / thermal margin. Remedies: keep a
+  clock cap in production, improve cooling, and open an NVIDIA case citing §3.
+- **Still crashes capped** ⇒ power transient is ruled out; the fault is elsewhere in the
+  SoC/firmware and the case for RMA / BSP update strengthens.
+
+Remaining questions:
+
+1. Is the GB10 lockup reproducible on a second Spark, or specific to this unit? (unit-specific
+   → RMA; model-wide → NVIDIA driver/BSP bug, needs a support case with the §3 signature.)
+2. Does a newer DGX Spark BSP / NVIDIA driver (> 580.173.02) fix it? Ask NVIDIA specifically
+   why `tegra234_cbb` is blacklisted **and** absent from the modules tree — with it, a
+   fabric error would be reportable.
+3. With LMCache removed and `max-num-batched-tokens` raised to 16384, where does the real
+   concurrency knee land, and does the N=12 collapse disappear? (§7c #1)
+4. Does the crash follow *load transients* or *sustained load*? A ramped-arrival run
+   (`--request-rate 2` instead of `inf`) at N=16 would separate these: same steady-state
+   load, far gentler transients.

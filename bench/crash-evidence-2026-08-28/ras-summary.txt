@@ -1,0 +1,16 @@
+perl: warning: Setting locale failed.
+perl: warning: Please check that your locale settings:
+	LANGUAGE = (unset),
+	LC_ALL = (unset),
+	LC_TERMINAL = "iTerm2",
+	LANG = "en_US.utf8"
+    are supported and installed on your system.
+perl: warning: Falling back to the standard locale ("C").
+No Memory errors.
+
+PCIe AER events summary:
+	329 Corrected errors: Receiver Error
+
+No Extlog errors.
+
+No MCE errors.
