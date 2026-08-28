@@ -1,0 +1,50 @@
+Without LMCache
+
+====== Engine Benchmark Result (multi-round-chat) ======
+-------------------- Configuration ---------------------
+Engine URL:           https://nemo35-lightning.krishb.in
+Model:                            nemotron-3.5-lightning
+Workload:                               multi-round-chat
+----------------------- Results ------------------------
+Successful requests:                                 166
+Failed requests:                                       0
+Benchmark duration (s):                            97.49
+Total input tokens:                              2036453
+Total output tokens:                               33200
+Input throughput (tok/s):                       20889.58
+Output throughput (tok/s):                        340.56
+----------------- Time to First Token ------------------
+Mean TTFT (ms):                                 17806.14
+P50 TTFT (ms):                                  21550.00
+P90 TTFT (ms):                                  30714.79
+P99 TTFT (ms):                                  31221.00
+-------------------- Decoding Speed --------------------
+Mean decode (tok/s):                               13.08
+P99 decode (tok/s):                                33.10
+========================================================
+
+
+With LMCache
+
+====== Engine Benchmark Result (multi-round-chat) ======
+-------------------- Configuration ---------------------
+Engine URL:           https://nemo35-lightning.krishb.in
+Model:                            nemotron-3.5-lightning
+Workload:                               multi-round-chat
+----------------------- Results ------------------------
+Successful requests:                                 164
+Failed requests:                                       0
+Benchmark duration (s):                            96.40
+Total input tokens:                              2011202
+Total output tokens:                               32800
+Input throughput (tok/s):                       20863.15
+Output throughput (tok/s):                        340.25
+----------------- Time to First Token ------------------
+Mean TTFT (ms):                                 18089.67
+P50 TTFT (ms):                                  21546.84
+P90 TTFT (ms):                                  30559.81
+P99 TTFT (ms):                                  32028.97
+-------------------- Decoding Speed --------------------
+Mean decode (tok/s):                               13.02
+P99 decode (tok/s):                                42.30
+========================================================

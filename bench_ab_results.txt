@@ -1,0 +1,159 @@
+[2026-08-27T21:07:39-07:00] applying capped vLLM (--kv-cache-memory 10GiB, util 0.35) + LMCache L1=4G
+deployment.apps/lmcache configured
+service/lmcache unchanged
+service/lmcache-http unchanged
+ingress.networking.k8s.io/lmcache unchanged
+deployment.apps/vllm-nemotron configured
+service/vllm-nemotron unchanged
+ingress.networking.k8s.io/vllm-nemotron unchanged
+deployment.apps/lmcache restarted
+deployment.apps/vllm-nemotron restarted
+Waiting for deployment "lmcache" rollout to finish: 0 out of 1 new replicas have been updated...
+Waiting for deployment "lmcache" rollout to finish: 0 out of 1 new replicas have been updated...
+Waiting for deployment "lmcache" rollout to finish: 0 out of 1 new replicas have been updated...
+Waiting for deployment "lmcache" rollout to finish: 0 of 1 updated replicas are available...
+deployment "lmcache" successfully rolled out
+[2026-08-27T21:11:38-07:00] vLLM KV pool: (EngineCore pid=236) INFO 08-28 04:10:43 [kv_cache_utils.py:2235] GPU KV cache size: 3,260,912 tokens  /  
+[2026-08-27T21:11:38-07:00] WARN: could not parse KV pool; keeping tokens_per_gb_kvcache from file
+[2026-08-27T21:11:38-07:00] derived: num_documents=326  total_requests=978  working_set~5.2M tokens vs pool 3260912 tokens
+[2026-08-27T21:11:38-07:00] config:
+    {
+      "workload": "long-doc-qa",
+      "engine_url": "https://nemo35-lightning.krishb.in",
+      "lmcache_url": "https://lmcache.krishb.in",
+      "model": "nemotron-3.5-lightning",
+      "tokens_per_gb_kvcache": 326000,
+      "seed": 42,
+      "kv_cache_volume": 16.0,
+      "ignore_eos": true,
+      "ldqa_document_length": 16000,
+      "ldqa_query_per_document": 3,
+      "ldqa_shuffle_policy": "random",
+      "ldqa_num_inflight_requests": 2,
+      "ldqa_max_output_length": 128
+    }
+
+[2026-08-27T21:11:38-07:00] =========== A1_lmcache_cold : START (mem used=57175MB avail=67434MB) ===========
+======== Engine Benchmark Result (long-doc-qa) =========
+-------------------- Configuration ---------------------
+Engine URL:           https://nemo35-lightning.krishb.in
+Model:                            nemotron-3.5-lightning
+Workload:                                    long-doc-qa
+----------------------- Results ------------------------
+Successful requests:                                 978
+Failed requests:                                       0
+Benchmark duration (s):                          1290.50
+Total input tokens:                             15670816
+Total output tokens:                              125184
+Input throughput (tok/s):                       12143.20
+Output throughput (tok/s):                         97.00
+----------------- Time to First Token ------------------
+Mean TTFT (ms):                                   780.18
+P50 TTFT (ms):                                    827.68
+P90 TTFT (ms):                                   1007.63
+P99 TTFT (ms):                                   1103.86
+-------------------- Decoding Speed --------------------
+Mean decode (tok/s):                               69.42
+P99 decode (tok/s):                                78.62
+========================================================
+  [lmcache post]     lmcache_mp_l2_prefetch_lookup_requests_total 1253.0
+  [lmcache post]     lmcache_mp_l2_prefetch_hit_chunks_total 6466.0
+  [lmcache post]     lmcache_mp_l2_store_completed_requests_total{l2_name="fs"} 2282.0
+  [lmcache post]     lmcache_mp_l2_load_completed_requests_total{l2_name="fs"} 925.0
+  [lmcache post]     lmcache_mp_lookup_requested_tokens_total{cache_salt="",model_name="nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4"} 1.9424384e+07
+  [lmcache post]     lmcache_mp_lookup_hit_tokens_total{cache_salt="",model_name="nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4"} 1.4538496e+07
+[2026-08-27T21:46:00-07:00] =========== A1_lmcache_cold : END rc=0 (mem used=57270MB avail=67339MB) ===========
+
+[2026-08-27T21:46:00-07:00] restart vLLM only (GPU cache cold, LMCache L2 warm)
+deployment.apps/vllm-nemotron restarted
+[2026-08-27T21:50:07-07:00] =========== A2_lmcache_warm : START (mem used=57645MB avail=66964MB) ===========
+  [lmcache pre]      lmcache_mp_l2_prefetch_lookup_requests_total 1253.0
+  [lmcache pre]      lmcache_mp_l2_prefetch_hit_chunks_total 6466.0
+  [lmcache pre]      lmcache_mp_l2_store_completed_requests_total{l2_name="fs"} 2282.0
+  [lmcache pre]      lmcache_mp_l2_load_completed_requests_total{l2_name="fs"} 925.0
+  [lmcache pre]      lmcache_mp_lookup_requested_tokens_total{cache_salt="",model_name="nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4"} 1.9424384e+07
+  [lmcache pre]      lmcache_mp_lookup_hit_tokens_total{cache_salt="",model_name="nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4"} 1.4538496e+07
+======== Engine Benchmark Result (long-doc-qa) =========
+-------------------- Configuration ---------------------
+Engine URL:           https://nemo35-lightning.krishb.in
+Model:                            nemotron-3.5-lightning
+Workload:                                    long-doc-qa
+----------------------- Results ------------------------
+Successful requests:                                 978
+Failed requests:                                       0
+Benchmark duration (s):                          1286.24
+Total input tokens:                             15670816
+Total output tokens:                              125184
+Input throughput (tok/s):                       12183.43
+Output throughput (tok/s):                         97.33
+----------------- Time to First Token ------------------
+Mean TTFT (ms):                                   781.72
+P50 TTFT (ms):                                    828.86
+P90 TTFT (ms):                                   1016.51
+P99 TTFT (ms):                                   1110.66
+-------------------- Decoding Speed --------------------
+Mean decode (tok/s):                               70.81
+P99 decode (tok/s):                                79.10
+========================================================
+  [lmcache post]     lmcache_mp_l2_prefetch_lookup_requests_total 2489.0
+  [lmcache post]     lmcache_mp_l2_prefetch_hit_chunks_total 15106.0
+  [lmcache post]     lmcache_mp_l2_store_completed_requests_total{l2_name="fs"} 2282.0
+  [lmcache post]     lmcache_mp_l2_load_completed_requests_total{l2_name="fs"} 2161.0
+  [lmcache post]     lmcache_mp_lookup_requested_tokens_total{cache_salt="",model_name="nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4"} 3.8848768e+07
+  [lmcache post]     lmcache_mp_lookup_hit_tokens_total{cache_salt="",model_name="nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4"} 3.396288e+07
+[2026-08-27T22:13:56-07:00] =========== A2_lmcache_warm : END rc=0 (mem used=57287MB avail=67322MB) ===========
+
+[2026-08-27T22:13:56-07:00] apply no-LMCache vLLM (strip --kv-transfer-config)
+deployment.apps/vllm-nemotron configured
+service/vllm-nemotron unchanged
+ingress.networking.k8s.io/vllm-nemotron unchanged
+deployment.apps/vllm-nemotron restarted
+[2026-08-27T22:17:58-07:00] =========== B_no_lmcache : START (mem used=57901MB avail=66708MB) ===========
+  [lmcache pre]      lmcache_mp_l2_prefetch_lookup_requests_total 2489.0
+  [lmcache pre]      lmcache_mp_l2_prefetch_hit_chunks_total 15106.0
+  [lmcache pre]      lmcache_mp_l2_store_completed_requests_total{l2_name="fs"} 2282.0
+  [lmcache pre]      lmcache_mp_l2_load_completed_requests_total{l2_name="fs"} 2161.0
+  [lmcache pre]      lmcache_mp_lookup_requested_tokens_total{cache_salt="",model_name="nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4"} 3.8848768e+07
+  [lmcache pre]      lmcache_mp_lookup_hit_tokens_total{cache_salt="",model_name="nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4"} 3.396288e+07
+======== Engine Benchmark Result (long-doc-qa) =========
+-------------------- Configuration ---------------------
+Engine URL:           https://nemo35-lightning.krishb.in
+Model:                            nemotron-3.5-lightning
+Workload:                                    long-doc-qa
+----------------------- Results ------------------------
+Successful requests:                                 978
+Failed requests:                                       0
+Benchmark duration (s):                          2974.25
+Total input tokens:                             15670816
+Total output tokens:                              125184
+Input throughput (tok/s):                        5268.83
+Output throughput (tok/s):                         42.09
+----------------- Time to First Token ------------------
+Mean TTFT (ms):                                  3524.37
+P50 TTFT (ms):                                   2860.83
+P90 TTFT (ms):                                   4808.40
+P99 TTFT (ms):                                   4968.71
+-------------------- Decoding Speed --------------------
+Mean decode (tok/s):                               58.40
+P99 decode (tok/s):                                86.39
+========================================================
+  [lmcache post]     lmcache_mp_l2_prefetch_lookup_requests_total 2489.0
+  [lmcache post]     lmcache_mp_l2_prefetch_hit_chunks_total 15106.0
+  [lmcache post]     lmcache_mp_l2_store_completed_requests_total{l2_name="fs"} 2282.0
+  [lmcache post]     lmcache_mp_l2_load_completed_requests_total{l2_name="fs"} 2161.0
+  [lmcache post]     lmcache_mp_lookup_requested_tokens_total{cache_salt="",model_name="nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4"} 3.8848768e+07
+  [lmcache post]     lmcache_mp_lookup_hit_tokens_total{cache_salt="",model_name="nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4"} 3.396288e+07
+[2026-08-27T23:20:13-07:00] =========== B_no_lmcache : END rc=0 (mem used=57347MB avail=67262MB) ===========
+
+[2026-08-27T23:20:13-07:00] restoring original configs
+deployment.apps/lmcache configured
+service/lmcache unchanged
+service/lmcache-http unchanged
+ingress.networking.k8s.io/lmcache unchanged
+deployment.apps/vllm-nemotron configured
+service/vllm-nemotron unchanged
+ingress.networking.k8s.io/vllm-nemotron unchanged
+deployment.apps/lmcache restarted
+deployment.apps/vllm-nemotron restarted
+[2026-08-27T23:24:19-07:00] restored + ready
+[2026-08-27T23:24:19-07:00] ALL DONE — results in /home/bharath/workspace/llm_serving/bench_ab_results.txt

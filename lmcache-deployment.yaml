@@ -110,7 +110,7 @@ spec:
             - --eviction-policy
             - LRU
             - --max-workers
-            - "2"
+            - "4"
             - --chunk-size
             - "2128"
             - --separate-object-groups
@@ -136,9 +136,14 @@ spec:
           resources:
             requests:
               cpu: "4"
-              # ~ --l1-size-gb 16 (pinned DRAM) + runtime overhead. L2 spills to
-              # the NVMe hostPath below and does not count here.
-              memory: 22Gi
+              # --l1-size-gb 4 (pinned DRAM) + worker/runtime overhead. L2 spills
+              # to the NVMe hostPath below and does not count here.
+              memory: 12Gi
+            limits:
+              # Hard cap so a runaway L1 / transfer-buffer allocation gets this
+              # pod OOM-killed (recoverable) instead of pushing the shared 128Gi
+              # unified pool into an NVIDIA-driver OOM that hard-crashes the node.
+              memory: 16Gi
           startupProbe:
             tcpSocket:
               port: 5555

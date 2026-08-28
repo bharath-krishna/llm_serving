@@ -1,0 +1,15 @@
+{
+  "workload": "long-doc-qa",
+  "engine_url": "https://nemo35-lightning.krishb.in",
+  "lmcache_url": "https://lmcache.krishb.in",
+  "model": "nemotron-3.5-lightning",
+  "tokens_per_gb_kvcache": 91000,
+  "seed": 42,
+  "kv_cache_volume": 50.0,
+  "ignore_eos": true,
+  "ldqa_document_length": 24000,
+  "ldqa_query_per_document": 3,
+  "ldqa_shuffle_policy": "tile",
+  "ldqa_num_inflight_requests": 3,
+  "ldqa_max_output_length": 128
+}

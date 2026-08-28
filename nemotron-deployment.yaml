@@ -52,8 +52,18 @@ spec:
           resources:
             limits:
               nvidia.com/gpu: "1"
+              # Backstop against unified-memory exhaustion. On this GB10 the GPU
+              # KV pool, model weights, pinned transfer buffers and the OS all
+              # draw from ONE 128Gi pool; an NVIDIA-driver OOM here hard-crashes
+              # the node (not a recoverable pod OOM-kill). The vllm flags cap the
+              # GPU side (--kv-cache-memory-bytes 10Gi, --gpu-memory-utilization
+              # 0.35 => ~45Gi ceiling for the whole engine process); this cgroup
+              # limit catches host-side runaway (pinned buffers, activations)
+              # with a pod restart before the box locks up.
+              memory: 48Gi
             requests:
               nvidia.com/gpu: "1"
+              memory: 32Gi
           volumeMounts:
             - mountPath: /root/.cache/huggingface
               name: huggingface-cache

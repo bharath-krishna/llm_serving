@@ -1,0 +1,98 @@
+Clean GPU Prefix cache and LMCache (L1 + L2)
+======== Engine Benchmark Result (long-doc-qa) =========
+-------------------- Configuration ---------------------
+Engine URL:           https://nemo35-lightning.krishb.in
+Model:                            nemotron-3.5-lightning
+Workload:                                    long-doc-qa
+----------------------- Results ------------------------
+Successful requests:                                 182
+Failed requests:                                       0
+Benchmark duration (s):                           208.99
+Total input tokens:                              1824075
+Total output tokens:                               23296
+Input throughput (tok/s):                        8728.26
+Output throughput (tok/s):                        111.47
+----------------- Time to First Token ------------------
+Mean TTFT (ms):                                  1014.68
+P50 TTFT (ms):                                   1065.87
+P90 TTFT (ms):                                   1185.79
+P99 TTFT (ms):                                   1235.26
+-------------------- Decoding Speed --------------------
+Mean decode (tok/s):                               53.59
+P99 decode (tok/s):                                62.45
+========================================================
+
+
+After restarting vllm (Cleared GPU Prefix Cache) + LMCache L1 + L2 retained
+======== Engine Benchmark Result (long-doc-qa) =========
+-------------------- Configuration ---------------------
+Engine URL:           https://nemo35-lightning.krishb.in
+Model:                            nemotron-3.5-lightning
+Workload:                                    long-doc-qa
+----------------------- Results ------------------------
+Successful requests:                                 182
+Failed requests:                                       0
+Benchmark duration (s):                           213.45
+Total input tokens:                              1824075
+Total output tokens:                               23296
+Input throughput (tok/s):                        8545.53
+Output throughput (tok/s):                        109.14
+----------------- Time to First Token ------------------
+Mean TTFT (ms):                                  1028.77
+P50 TTFT (ms):                                   1065.23
+P90 TTFT (ms):                                   1184.83
+P99 TTFT (ms):                                   1283.17
+-------------------- Decoding Speed --------------------
+Mean decode (tok/s):                               52.25
+P99 decode (tok/s):                                59.66
+========================================================
+
+
+After restarting vllm and LMCache (Cleared GPU Prefix Cache + LMCache L1) + L2 retained
+======== Engine Benchmark Result (long-doc-qa) =========
+-------------------- Configuration ---------------------
+Engine URL:           https://nemo35-lightning.krishb.in
+Model:                            nemotron-3.5-lightning
+Workload:                                    long-doc-qa
+----------------------- Results ------------------------
+Successful requests:                                 182
+Failed requests:                                       0
+Benchmark duration (s):                           215.19
+Total input tokens:                              1824075
+Total output tokens:                               23296
+Input throughput (tok/s):                        8476.61
+Output throughput (tok/s):                        108.26
+----------------- Time to First Token ------------------
+Mean TTFT (ms):                                  1034.59
+P50 TTFT (ms):                                   1101.07
+P90 TTFT (ms):                                   1227.58
+P99 TTFT (ms):                                   1324.90
+-------------------- Decoding Speed --------------------
+Mean decode (tok/s):                               51.83
+P99 decode (tok/s):                                57.99
+========================================================
+
+
+Rerun without restarting anytihing (All retain)
+======== Engine Benchmark Result (long-doc-qa) =========
+-------------------- Configuration ---------------------
+Engine URL:           https://nemo35-lightning.krishb.in
+Model:                            nemotron-3.5-lightning
+Workload:                                    long-doc-qa
+----------------------- Results ------------------------
+Successful requests:                                 182
+Failed requests:                                       0
+Benchmark duration (s):                           215.96
+Total input tokens:                              1824075
+Total output tokens:                               23296
+Input throughput (tok/s):                        8446.50
+Output throughput (tok/s):                        107.87
+----------------- Time to First Token ------------------
+Mean TTFT (ms):                                  1038.44
+P50 TTFT (ms):                                   1112.21
+P90 TTFT (ms):                                   1229.62
+P99 TTFT (ms):                                   1301.00
+-------------------- Decoding Speed --------------------
+Mean decode (tok/s):                               51.65
+P99 decode (tok/s):                                58.99
+========================================================

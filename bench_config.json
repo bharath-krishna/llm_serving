@@ -1,4 +1,5 @@
 {
+  "_comment": "SAFE config from the 2026-08-27 A/B run. Assumes vLLM is running with --kv-cache-memory-bytes 10737418240 (10 GiB pool). Running an eviction-forcing bench against the UNCAPPED production vLLM (--gpu-memory-utilization 0.50) can crash the node - see lmcache-benchmark-report.md section 3. The previous config that crashed the box is saved as bench_config.UNSAFE-crashed-the-node.json.",
   "workload": "long-doc-qa",
   "engine_url": "https://nemo35-lightning.krishb.in",
   "lmcache_url": "https://lmcache.krishb.in",

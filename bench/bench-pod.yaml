@@ -1,0 +1,29 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: vllm-bench
+  namespace: vllm
+  labels: { app: vllm-bench }
+spec:
+  restartPolicy: Never
+  runtimeClassName: nvidia          # same rootfs/CDI env; NO GPU requested
+  containers:
+    - name: bench
+      image: vllm/vllm-openai:v0.27.1   # has `vllm bench serve` + the tokenizer
+      command: ["sleep", "infinity"]
+      env:
+        - name: HF_HOME
+          value: /hf
+        - name: HF_HUB_OFFLINE
+          value: "1"
+      volumeMounts:
+        - { name: hf, mountPath: /hf, readOnly: true }
+        - { name: results, mountPath: /results }
+      resources:
+        requests: { cpu: "2", memory: 4Gi }
+        limits:   { cpu: "4", memory: 8Gi }
+  volumes:
+    - name: hf
+      hostPath: { path: /home/bharath/.cache/huggingface, type: Directory }
+    - name: results
+      hostPath: { path: /var/lib/vllm-bench-results, type: DirectoryOrCreate }
