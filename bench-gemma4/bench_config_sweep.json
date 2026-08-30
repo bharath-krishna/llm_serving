@@ -1,0 +1,15 @@
+{
+  "_comment": "BASE config for the concurrency sweep -- sweep-pod.yaml overwrites ldqa_num_inflight_requests per level and leaves everything else identical, so every level does exactly the same work. num_documents = int(kv_cache_volume * tokens_per_gb_kvcache / ldqa_document_length) = int(9.6*15000/16000) = 9 docs x 3 queries = 27 requests per level (verified in long_doc_qa.py LongDocQAConfig.resolve). That is smaller than the 15-doc single-shot baseline purely to keep a 6-level sweep under ~1h, so sweep numbers are NOT directly comparable to the 45-request baseline run -- compare levels to each other. PREFIX CACHE: seed is fixed so all levels see the same documents, and the KV pool is not reset between levels. That does not hand later levels a free ride: the working set is 9*16000 = 144k tokens against a ~82k-token pool, so prefix cache entries thrash by design (that is what kv_cache_volume is for) and each level also runs its own 15-request warmup before measuring. AUTH: `model` MUST stay set. lmcache bench sends OPENAI_API_KEY as a bearer token on /v1/chat/completions but NOT on its /v1/models auto-detect probe, which 401s against the authenticated endpoint.",
+  "workload": "long-doc-qa",
+  "engine_url": "http://vllm-gemma4.vllm.svc.cluster.local:8088",
+  "model": "gemma4-31b",
+  "seed": 42,
+  "ignore_eos": true,
+  "kv_cache_volume": 9.6,
+  "tokens_per_gb_kvcache": 15000,
+  "ldqa_document_length": 16000,
+  "ldqa_query_per_document": 3,
+  "ldqa_shuffle_policy": "random",
+  "ldqa_num_inflight_requests": 1,
+  "ldqa_max_output_length": 128
+}

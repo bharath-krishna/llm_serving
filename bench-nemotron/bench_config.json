@@ -1,0 +1,16 @@
+{
+  "_comment": "HEAVY long-doc-qa run -- the eviction-forcing one. num_documents = int(kv_cache_volume * tokens_per_gb_kvcache / ldqa_document_length) = int(16.0*326000/16000) = 326 docs x 3 queries = 978 requests (formula per long_doc_qa.py LongDocQAConfig.resolve). kv_cache_volume 16.0 against a 10 GiB pool is deliberate 1.6x oversubscription: the working set is 5.2M tokens against the engine's 3,260,912-token GPU KV cache, so entries thrash and the LMCache MP path is actually exercised. THIS IS THE DANGEROUS RUN. Sustained long-context load is what hard-reset the node on 2026-08-27 and again on 2026-08-30T07:04:05Z -- run it with the telemetry from start-telemetry.sh attached, not unattended. Use bench_config_smoke.json to check the plumbing first. ASSUMES the deployment is CAPPED at --kv-cache-memory-bytes 10737418240; against an uncapped vLLM (--gpu-memory-utilization 0.50) this config crashed the box, see lmcache-benchmark-report.md section 3, and the older sizing that did it is quarantined in bench_config.UNSAFE-crashed-the-node.json. tokens_per_gb_kvcache 326000 is measured, not guessed: vLLM logs 'GPU KV cache size: 3,260,912 tokens' for the 10 GiB pool (the 91000 in the original config was wrong -- report section 5 item 5). IN-CLUSTER URLS: talks to the Services directly rather than the public https://nemo35-lightning.krishb.in ingress, so the load never leaves the node and is not shaped by haproxy timeouts. AUTH: `model` MUST stay set -- lmcache bench sends OPENAI_API_KEY as a bearer token on /v1/chat/completions but NOT on its /v1/models auto-detect probe, which 401s against the authenticated endpoint.",
+  "workload": "long-doc-qa",
+  "engine_url": "http://vllm-nemotron.vllm.svc.cluster.local:8000",
+  "lmcache_url": "http://lmcache-http.vllm.svc.cluster.local",
+  "model": "nemotron-3.5-lightning",
+  "seed": 42,
+  "ignore_eos": true,
+  "kv_cache_volume": 16.0,
+  "tokens_per_gb_kvcache": 326000,
+  "ldqa_document_length": 16000,
+  "ldqa_query_per_document": 3,
+  "ldqa_shuffle_policy": "random",
+  "ldqa_num_inflight_requests": 2,
+  "ldqa_max_output_length": 128
+}

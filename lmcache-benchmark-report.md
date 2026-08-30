@@ -266,7 +266,7 @@ The production `--gpu-memory-utilization 0.50` gives a **37.7 GiB / 12.29 M-toke
 2. **Keep `--enable-prefix-caching` on** — it is the fast path (zero-copy local hits); LMCache only fills its misses. The two stack.
 3. **Do not benchmark LMCache with a working set that fits the GPU pool** — the result is always "no difference," and it is not informative.
 4. **Memory safety for future large-scale tests on this box:** never run an eviction-forcing benchmark without capping the vLLM KV pool (`--kv-cache-memory-bytes`) or lowering `--gpu-memory-utilization`. Idle headroom under the production config is only ~36 GiB, and a GPU driver OOM crashes the whole node.
-5. **Fix `tokens_per_gb_kvcache` in `bench_config.json`** — the real value for this model is **~326 000** (was 91 000). Or drop the key and let the bench auto-resolve from `https://lmcache.krishb.in/status`.
+5. ~~**Fix `tokens_per_gb_kvcache` in `bench-nemotron/bench_config.json`**~~ — DONE 2026-08-30: it is now 326 000. The real value for this model is **~326 000** (was 91 000). Or drop the key and let the bench auto-resolve from `https://lmcache.krishb.in/status`.
 6. **A₁ (cold-L2 warm-up run) can be skipped** in future A/B runs; A₁ ≈ A₂.
 7. If OpenCode / interactive sessions crash the box again, the mitigation is the same class of change: cap the KV pool and/or lower `--l1-size-gb`, not `--block-size` (which is pinned to 2128 for this hybrid model).
 
@@ -281,7 +281,7 @@ The production `--gpu-memory-utilization 0.50` gives a **37.7 GiB / 12.29 M-toke
 | `bench_ab_results.txt` | raw driver log + all three result blocks + LMCache metric snapshots |
 | `nemotron-deployment.yaml` | vLLM engine (restored to production config: `--gpu-memory-utilization 0.50`, `--kv-transfer-config` present, no `--kv-cache-memory-bytes`) |
 | `lmcache-deployment.yaml` | LMCache MP server (restored: `--l1-size-gb 8`, `--max-workers 4`) |
-| `bench_config.json` | bench config |
+| `bench-nemotron/bench_config.json` | bench config (moved from the repo root 2026-08-30) |
 | `scratchpad/ab_bench2.sh` | the A/B driver (capped configs, memory guard, auto-restore) |
 | `scratchpad/raw2_*.txt`, `scratchpad/csv2_*.csv` | per-phase raw bench output + per-request CSVs |
 | `scratchpad/*.orig` | pre-run backups of the three config files |

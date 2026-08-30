@@ -1,0 +1,16 @@
+{
+  "_comment": "multi-round-chat on gemma4-31b. SIZING RULE - max-model-len is a hard 131072 and this workload's Session.exchanges list grows FOREVER: prompt(round N) = shared + history + N*(user_input + output). Here 2000 + 20000 + N*756; rounds-per-session = qps*duration/num_users = 2*180/10 = 36, so the worst-case turn is 2000+20000+36*756 = ~49k, less than half the ceiling. This is exactly what --mrc-user-input-length=100000 got wrong on 2026-08-30: round 2 already reached 130945 input tokens and vLLM rejected it with VLLMValidationError. num_concurrent_users is DERIVED as kv_cache_volume*tokens_per_gb_kvcache/(shared+history) = 16*15000/22000 = 10, which is why tokens_per_gb_kvcache is pinned - left to auto-resolve it can generate far more concurrent sessions than the box tolerates. No LMCache: gemma4 runs without --kv-transfer-config (see the header of gemma4-deployment_spark.yaml for why), so lmcache_url is omitted and tokens_per_gb_kvcache is pinned instead of auto-resolved from the MP server. 15000 = the engine's measured effective capacity, 4.40x concurrency at the 131072-token context over a 37.5 GiB pool (4.40*131072/37.5). The raw 'GPU KV cache size: 81,920 tokens' figure understates it because Gemma-4's sliding-window layers only hold a window. AUTH: `model` MUST stay set here. lmcache bench sends OPENAI_API_KEY as a bearer token on /v1/chat/completions (200 OK) but NOT on its /v1/models auto-detect probe, which 401s against the authenticated endpoint. With `model` pinned the probe is never needed; drop it and the run cannot resolve the model name.",
+  "workload": "multi-round-chat",
+  "engine_url": "http://vllm-gemma4.vllm.svc.cluster.local:8088",
+  "model": "gemma4-31b",
+  "seed": 42,
+  "ignore_eos": true,
+  "kv_cache_volume": 16.0,
+  "tokens_per_gb_kvcache": 15000,
+  "mrc_shared_prompt_length": 2000,
+  "mrc_chat_history_length": 20000,
+  "mrc_user_input_length": 500,
+  "mrc_output_length": 256,
+  "mrc_qps": 2.0,
+  "mrc_duration": 180.0
+}

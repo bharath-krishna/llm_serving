@@ -20,11 +20,30 @@ metadata:
 spec:
   selector:
     matchLabels:
-      app: vllm-nemotron        # the Service `vllm-nemotron` (port name: http -> 8000)
+      app: vllm-nemotron # the Service `vllm-nemotron` (port name: http -> 8000)
   namespaceSelector:
     matchNames: ["vllm"]
   endpoints:
-    - port: http                # vLLM serves /metrics on the API port
+    - port: http # vLLM serves /metrics on the API port
+      path: /metrics
+      interval: 15s
+      scrapeTimeout: 10s
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: vllm-gemma4
+  namespace: vllm
+  labels:
+    release: prometheus
+spec:
+  selector:
+    matchLabels:
+      app: vllm-gemma4 # the Service `vllm-gemma4` (port name: http -> 8088)
+  namespaceSelector:
+    matchNames: ["vllm"]
+  endpoints:
+    - port: http # vLLM serves /metrics on the API port
       path: /metrics
       interval: 15s
       scrapeTimeout: 10s
@@ -39,11 +58,11 @@ metadata:
 spec:
   selector:
     matchLabels:
-      monitoring: "true"        # only the headless `lmcache` Service (not `lmcache-http`)
+      monitoring: "true" # only the headless `lmcache` Service (not `lmcache-http`)
   namespaceSelector:
     matchNames: ["vllm"]
   endpoints:
-    - port: http                # FastAPI frontend on 8080 also serves /metrics
+    - port: http # FastAPI frontend on 8080 also serves /metrics
       path: /metrics
       interval: 15s
       scrapeTimeout: 10s

@@ -1,0 +1,16 @@
+{
+  "_comment": "BASE config for the concurrency sweep -- sweep-pod.yaml overwrites ldqa_num_inflight_requests per level and leaves everything else identical, so every level does exactly the same work. num_documents = int(kv_cache_volume * tokens_per_gb_kvcache / ldqa_document_length) = int(0.45*326000/16000) = 9 docs x 3 queries = 27 requests per level, sized to keep a 5-level sweep under ~1h. WHAT THIS MEASURES: 9*16000 = 144k tokens against a 3,260,912-token pool, so NOTHING evicts -- this isolates concurrency scaling from cache pressure. That is a deliberate difference from bench-gemma4/bench_config_sweep.json, whose working set deliberately thrashes a much smaller pool; the two sweeps are NOT comparable to each other, and neither is comparable to the 978-request bench_config.json. Compare levels within one sweep only. LEVELS: the vllm-bench-serve sweep in BENCHMARK-HANDOFF.md section 5 found the knee at 8 concurrent (227.9 out tok/s), collapse at 12 (125.2, TTFT p99 30.1s), and a NODE CRASH at 16 -- which is why sweep-pod.yaml defaults to '1 2 4 8 12' and leaves 16 opt-in. AUTH: `model` MUST stay set -- the /v1/models auto-detect probe does not carry the bearer token and 401s against the authenticated endpoint.",
+  "workload": "long-doc-qa",
+  "engine_url": "http://vllm-nemotron.vllm.svc.cluster.local:8000",
+  "lmcache_url": "http://lmcache-http.vllm.svc.cluster.local",
+  "model": "nemotron-3.5-lightning",
+  "seed": 42,
+  "ignore_eos": true,
+  "kv_cache_volume": 0.45,
+  "tokens_per_gb_kvcache": 326000,
+  "ldqa_document_length": 16000,
+  "ldqa_query_per_document": 3,
+  "ldqa_shuffle_policy": "random",
+  "ldqa_num_inflight_requests": 1,
+  "ldqa_max_output_length": 128
+}

@@ -1,51 +1,67 @@
+# Refer this
+# https://forums.developer.nvidia.com/t/gemma-4-day-1-inference-on-nvidia-dgx-spark-preliminary-benchmarks/365503
+# exec vllm serve google/gemma-4-E4B \
+#
+# NO LMCache (--kv-transfer-config) on this model. Measured 2026-08-30:
+#  1. Attaching ANY KV connector makes vLLM disable the hybrid KV cache manager
+#     ("Turning off hybrid kv cache manager because `--kv-transfer-config` is
+#     set"), which re-sizes Gemma-4's sliding-window layers as full attention.
+#     Per-request KV at 131072 tokens goes ~8.5 GiB -> 55 GiB and the engine
+#     refuses to start: "55.0 GiB KV cache is needed, which is larger than the
+#     available KV cache memory (37.52 GiB) ... estimated maximum model length
+#     is 89424". That is a 6.4x loss of effective KV capacity.
+#  2. The documented escape hatch, --no-disable-hybrid-kv-cache-manager, is
+#     rejected: "Connector LMCacheMPConnector does not support HMA but HMA is
+#     enabled." This image ships lmcache 0.4.3, whose connector predates vLLM's
+#     `SupportsHMA`; only 0.5.3 (in vllm/vllm-openai:v0.27.1, which the lmcache
+#     server pod runs) subclasses it. A 0.4.3 client against the 0.5.3 MP server
+#     would also be a protocol mismatch.
+# So gemma4 is benchmarked WITHOUT LMCache -- see bench-gemma4/. Revisit only if
+# this image is rebuilt on lmcache >= 0.5.3.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: vllm-nemotron
+  name: vllm-gemma4
   namespace: vllm
   labels:
-    app: vllm-nemotron
+    app: vllm-gemma4
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: vllm-nemotron
+      app: vllm-gemma4
   strategy:
     type: Recreate
   template:
     metadata:
       labels:
-        app: vllm-nemotron
+        app: vllm-gemma4
     spec:
       runtimeClassName: nvidia
       hostIPC: true
       containers:
         - name: vllm
-          image: vllm/vllm-openai:v0.27.1
-          # command: ["sleep", "infinity"]
+          image: vllm/vllm-openai:gemma4-cu130
           command: ["/bin/bash", "-c"]
           args:
             - |
-              exec vllm serve nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 \
-                --served-model-name nemotron-3.5-lightning \
-                --max-num-seqs 32 \
-                --max-model-len 262144 \
+              exec vllm serve nvidia/Gemma-4-31B-IT-NVFP4 \
+                --served-model-name gemma4-31b \
+                --tensor-parallel-size 1 \
+                --dtype auto \
+                --load-format safetensors \
+                --max-model-len 131072 \
+                --max-num-seqs 16 \
+                --max-num-batched-tokens 8192 \
+                --gpu-memory-utilization 0.60 \
+                --kv-cache-dtype fp8 \
+                --enable-chunked-prefill \
                 --enable-prefix-caching \
-                --async-scheduling \
-                --max-num-batched-tokens 2192 \
-                --mamba-backend flashinfer \
-                --mamba-ssm-cache-dtype float16 \
-                --gpu-memory-utilization 0.35 \
-                --kv-cache-memory-bytes 10737418240 \
-                --mamba-cache-mode align \
-                --enable-mamba-cache-stochastic-rounding \
-                --mamba-cache-philox-rounds 5 \
-                --reasoning-parser nemotron_v3 \
+                --trust-remote-code \
                 --enable-auto-tool-choice \
-                --tool-call-parser qwen3_coder \
-                --host 0.0.0.0 \
-                --port 8000 \
-                --kv-transfer-config '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both", "kv_connector_extra_config": {"lmcache.mp.host": "tcp://lmcache.vllm.svc.cluster.local", "lmcache.mp.port": 5555}}'
+                --tool-call-parser pythonic \
+                --host 0.0.0.0 --port 8088 \
+                --reasoning-parser gemma4
           env:
             # Shared auth for every OpenAI-compatible endpoint in this namespace
             # (vllm-auth Secret; gemma4 and nemotron use the same key). vLLM
@@ -72,7 +88,7 @@ spec:
                   name: vllm-auth
                   key: api-key
           ports:
-            - containerPort: 8000
+            - containerPort: 8088
               name: http
           resources:
             limits:
@@ -80,10 +96,10 @@ spec:
               # Backstop against unified-memory exhaustion. On this GB10 the GPU
               # KV pool, model weights, pinned transfer buffers and the OS all
               # draw from ONE 128Gi pool; an NVIDIA-driver OOM here hard-crashes
-              # the node (not a recoverable pod OOM-kill). The vllm flags cap the
-              # GPU side (--kv-cache-memory-bytes 10Gi, --gpu-memory-utilization
-              # 0.35 => ~45Gi ceiling for the whole engine process); this cgroup
-              # limit catches host-side runaway (pinned buffers, activations)
+              # the node (not a recoverable pod OOM-kill). --gpu-memory-utilization
+              # 0.60 caps the GPU side (measured: 37.45 GiB KV pool => 81,808
+              # tokens, 4.39x concurrency at the full 131,072-token context); this
+              # cgroup limit catches host-side runaway (pinned buffers, activations)
               # with a pod restart before the box locks up.
               memory: 48Gi
             requests:
@@ -92,36 +108,45 @@ spec:
           volumeMounts:
             - mountPath: /root/.cache/huggingface
               name: huggingface-cache
+            - mountPath: /usr/local/lib/python3.12/dist-packages/vllm/model_executor/models/gemma4.py
+              name: gemma4-patch
+              subPath: gemma4_patched.py
+            - mountPath: /dev/shm
+              name: dshm
       volumes:
         - name: huggingface-cache
           hostPath:
             path: /home/bharath/.cache/huggingface
             type: DirectoryOrCreate
-      # No /dev/shm emptyDir: with `hostIPC: true` the pod already shares the
-      # host's /dev/shm, which is how LMCacheMPConnector's CUDA-IPC + shared-mem
-      # transfer reaches the lmcache server pod (also hostIPC: true). An emptyDir
-      # here would give this pod a PRIVATE /dev/shm and break that channel.
+        - name: gemma4-patch
+          hostPath:
+            path: /home/bharath/workspace/dgx-spark-vllm-gemma4-26b-uncensored/patches
+            type: Directory
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 32Gi
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: vllm-nemotron
+  name: vllm-gemma4
   namespace: vllm
   labels:
-    app: vllm-nemotron
+    app: vllm-gemma4
 spec:
   selector:
-    app: vllm-nemotron
+    app: vllm-gemma4
   ports:
-    - port: 8000
-      targetPort: 8000
+    - port: 8088
+      targetPort: 8088
       name: http
   type: ClusterIP
 ---
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
-  name: vllm-nemotron
+  name: vllm-gemma4
   namespace: vllm
   annotations:
     haproxy.org/timeout-http-request: "600s"
@@ -130,23 +155,23 @@ metadata:
 spec:
   ingressClassName: haproxy
   rules:
-    - host: nemotron.local
+    - host: gemma4.local
       http:
         paths:
           - path: /
             pathType: Prefix
             backend:
               service:
-                name: vllm-nemotron
+                name: vllm-gemma4
                 port:
-                  number: 8000
-    - host: nemo35-lightning.krishb.in
+                  number: 8088
+    - host: gemma4.krishb.in
       http:
         paths:
           - path: /
             pathType: Prefix
             backend:
               service:
-                name: vllm-nemotron
+                name: vllm-gemma4
                 port:
-                  number: 8000
+                  number: 8088

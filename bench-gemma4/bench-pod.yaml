@@ -1,0 +1,70 @@
+# `lmcache bench engine` driver for the gemma4-31b deployment.
+#
+#   ./run.sh                        # long-doc-qa
+#   ./run.sh bench_config_mrc.json  # multi-round-chat
+#
+# Results land on the node's real disk (hostPath /var/lib/vllm-bench-results),
+# NOT a tmpfs -- session 1 of the nemotron sweep lost everything to a tmpfs when
+# the node hard-reset. See BENCHMARK-HANDOFF.md section 3.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: gemma4-bench
+  namespace: vllm
+  labels: { app: gemma4-bench }
+spec:
+  restartPolicy: Never
+  # Same rootfs/CDI env as the server pods, but NO GPU is requested: this is a
+  # pure HTTP client. Requesting one would contend with the vllm-gemma4 pod.
+  runtimeClassName: nvidia
+  containers:
+    - name: bench
+      image: vllm/vllm-openai:v0.27.1 # ships the `lmcache` CLI (v0.5.3)
+      command: ["/bin/bash", "-c"]
+      args:
+        - |
+          set -euo pipefail
+          RUN="/results/gemma4-${CONFIG_NAME%.json}-$(date -u +%Y%m%dT%H%M%SZ)"
+          mkdir -p "$RUN"
+          cp "/config/$CONFIG_NAME" "$RUN/config.json"
+          exec lmcache bench engine \
+            --config "/config/$CONFIG_NAME" \
+            --no-interactive \
+            --output-dir "$RUN" \
+            --json 2>&1 | tee "$RUN/bench.log"
+      env:
+        # Switch workloads by editing this one value: bench_config.json
+        # (long-doc-qa) or bench_config_mrc.json (multi-round-chat).
+        - name: CONFIG_NAME
+          value: bench_config.json
+        - name: LMCACHE_DISABLE_BANNER
+          value: "1"
+        # The vllm endpoints require auth (VLLM_API_KEY, from the shared
+        # vllm-auth Secret). `lmcache bench engine` sends whatever is in
+        # OPENAI_API_KEY as the bearer token; without this every request 401s.
+        - name: OPENAI_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: vllm-auth
+              key: api-key
+        - name: HF_HOME
+          value: /hf
+        - name: HF_HUB_OFFLINE
+          value: "1"
+      volumeMounts:
+        - { name: config, mountPath: /config, readOnly: true }
+        - { name: hf, mountPath: /hf, readOnly: true }
+        - { name: results, mountPath: /results }
+      resources:
+        requests: { cpu: "2", memory: 4Gi }
+        # The client tokenizes every generated prompt; capped so a runaway
+        # working set gets this pod OOM-killed instead of pushing the shared
+        # 128Gi unified pool into a driver OOM that hard-resets the node.
+        limits: { cpu: "4", memory: 8Gi }
+  volumes:
+    - name: config
+      configMap: { name: gemma4-bench-config }
+    - name: hf
+      hostPath: { path: /home/bharath/.cache/huggingface, type: Directory }
+    - name: results
+      hostPath: { path: /var/lib/vllm-bench-results, type: DirectoryOrCreate }

@@ -1,0 +1,97 @@
+# `lmcache bench engine` driver for the nemotron-3.5-lightning deployment.
+#
+# The configs are delivered by ConfigMap, so a bench never depends on a file
+# happening to exist on the node. Build/refresh it from the repo before every
+# apply -- editing a config file alone changes nothing until you re-create it:
+#
+#   ./run.sh                          # smoke, 15 requests
+#   ./run.sh bench_config_mrc.json    # multi-round-chat
+#
+# run.sh rebuilds the ConfigMap and patches CONFIG_NAME below. To drive it by
+# hand instead:
+#
+#   kubectl create configmap vllm-bench-config -n vllm \
+#     --from-file=bench_config.json --from-file=bench_config_smoke.json \
+#     --from-file=bench_config_mrc.json --from-file=bench_config_sweep.json \
+#     --dry-run=client -o yaml | kubectl apply -f -
+#
+#   kubectl delete pod vllm-bench -n vllm --ignore-not-found
+#   kubectl apply -f bench-pod.yaml && kubectl logs -n vllm -f vllm-bench
+#
+# Pick the workload with the CONFIG_NAME env below:
+#   bench_config_smoke.json  ->   15 requests, nothing evicts        (safe)
+#   bench_config_sweep.json  ->   27 requests, one sweep level
+#   bench_config_mrc.json    ->  multi-round-chat, 8 sessions
+#   bench_config.json        ->  978 requests, forces KV eviction    (has crashed the node)
+#
+# Results land on the node's real disk (hostPath /var/lib/vllm-bench-results),
+# NOT a tmpfs -- session 1 of the nemotron sweep lost everything to a tmpfs when
+# the node hard-reset. See BENCHMARK-HANDOFF.md section 3.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: vllm-bench
+  namespace: vllm
+  labels: { app: vllm-bench }
+spec:
+  restartPolicy: Never
+  # Same rootfs/CDI env as the server pods, but NO GPU is requested: this is a
+  # pure HTTP client. Requesting one would contend with the vllm-nemotron pod.
+  runtimeClassName: nvidia
+  containers:
+    - name: bench
+      image: vllm/vllm-openai:v0.27.1 # ships the `lmcache` CLI + the tokenizer
+      command: ["/bin/bash", "-c"]
+      args:
+        - |
+          set -euo pipefail
+          RUN="/results/nemotron-${CONFIG_NAME%.json}-$(date -u +%Y%m%dT%H%M%SZ)"
+          mkdir -p "$RUN"
+          # Snapshot the exact config next to its results: the ConfigMap is
+          # mutable and a later edit would otherwise silently re-label this run.
+          cp "/config/$CONFIG_NAME" "$RUN/config.json"
+          exec lmcache bench engine \
+            --config "/config/$CONFIG_NAME" \
+            --no-interactive \
+            --output-dir "$RUN" \
+            --json 2>&1 | tee "$RUN/bench.log"
+      env:
+        # Which config to run. Must name a key in the vllm-bench-config
+        # ConfigMap -- the volume below surfaces every key as /config/<key>.
+        - name: CONFIG_NAME
+          value: bench_config_smoke.json
+        - name: LMCACHE_DISABLE_BANNER
+          value: "1"
+        # The vllm endpoints require auth: the server reads VLLM_API_KEY from
+        # the shared `vllm-auth` Secret (see nemotron-deployment.yaml), and the
+        # client sends whatever is in OPENAI_API_KEY as its bearer token. Both
+        # sides therefore read the SAME Secret key, and a rotation re-rolls the
+        # deployments while any bench pod picks it up on next create. Without
+        # this every request 401s. Keep it a secretKeyRef, never a literal --
+        # a literal would land in git and in `kubectl get pod -o yaml`.
+        - name: OPENAI_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: vllm-auth
+              key: api-key
+        - name: HF_HOME
+          value: /hf
+        - name: HF_HUB_OFFLINE
+          value: "1"
+      volumeMounts:
+        - { name: config, mountPath: /config, readOnly: true }
+        - { name: hf, mountPath: /hf, readOnly: true }
+        - { name: results, mountPath: /results }
+      resources:
+        requests: { cpu: "2", memory: 4Gi }
+        # The client tokenizes every generated prompt; capped so a runaway
+        # working set gets this pod OOM-killed instead of pushing the shared
+        # 128Gi unified pool into a driver OOM that hard-resets the node.
+        limits: { cpu: "4", memory: 8Gi }
+  volumes:
+    - name: config
+      configMap: { name: vllm-bench-config }
+    - name: hf
+      hostPath: { path: /home/bharath/.cache/huggingface, type: Directory }
+    - name: results
+      hostPath: { path: /var/lib/vllm-bench-results, type: DirectoryOrCreate }
