@@ -13,6 +13,7 @@
 #   kubectl create configmap vllm-bench-config -n vllm \
 #     --from-file=bench_config.json --from-file=bench_config_smoke.json \
 #     --from-file=bench_config_mrc.json --from-file=bench_config_sweep.json \
+#     --from-file=bench_config_permutator.json \
 #     --dry-run=client -o yaml | kubectl apply -f -
 #
 #   kubectl delete pod vllm-bench -n vllm --ignore-not-found
@@ -22,6 +23,8 @@
 #   bench_config_smoke.json  ->   15 requests, nothing evicts        (safe)
 #   bench_config_sweep.json  ->   27 requests, one sweep level
 #   bench_config_mrc.json    ->  multi-round-chat, 8 sessions
+#   bench_config_permutator.json -> 10 reordered-context requests; needs a tokenizer,
+#                                   so its `model` is the HF repo ID (see that file)
 #   bench_config.json        ->  978 requests, forces KV eviction    (has crashed the node)
 #
 # Results land on the node's real disk (hostPath /var/lib/vllm-bench-results),
@@ -59,7 +62,7 @@ spec:
         # Which config to run. Must name a key in the vllm-bench-config
         # ConfigMap -- the volume below surfaces every key as /config/<key>.
         - name: CONFIG_NAME
-          value: bench_config_smoke.json
+          value: bench_config.json
         - name: LMCACHE_DISABLE_BANNER
           value: "1"
         # The vllm endpoints require auth: the server reads VLLM_API_KEY from

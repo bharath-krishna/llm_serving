@@ -116,6 +116,20 @@ spec:
             - --separate-object-groups
             - --supported-transfer-mode
             - lmcache_driven
+            # Disable worker reaping. The reaper judges never-pinged instances
+            # against worker-registration-grace-seconds (default 3600) and the
+            # vLLM-side heartbeat that would prove liveness NEVER RUNS in
+            # lmcache 0.5.3: _ensure_heartbeat_started() guards on
+            # `if self._heartbeats is not None: return`, but _heartbeats is
+            # initialised to {} -- always not-None, so the thread is never
+            # started (and its call site also omits instance_id, which the
+            # server's PING handler requires to refresh liveness). Net effect:
+            # any engine idle for an hour gets its GPU context reaped, and every
+            # later request fails "No GPU context registered for instance ID".
+            # That is exactly what happened 2026-08-30 09:13:13Z. 0 disables the
+            # reaper thread entirely -- safe here, there is one engine pod.
+            - --worker-reap-timeout-seconds
+            - "0"
             # L2 = cold tier on NVMe (ext4, ~1.3 TB free). Blocks evicted from the
             # 16Gi L1 land here instead of being dropped, so the effective cache
             # is disk-sized without spending DRAM. Plain buffered file I/O — no
@@ -124,7 +138,7 @@ spec:
             - '{"type":"fs","base_path":"/kv-l2"}'
           env:
             - name: LMCACHE_LOG_LEVEL
-              value: "INFO"   # verify store/load activity on bringup; set INFO after
+              value: "INFO" # verify store/load activity on bringup; set INFO after
           volumeMounts:
             - name: kv-l2
               mountPath: /kv-l2
@@ -138,12 +152,12 @@ spec:
               cpu: "4"
               # --l1-size-gb 4 (pinned DRAM) + worker/runtime overhead. L2 spills
               # to the NVMe hostPath below and does not count here.
-              memory: 12Gi
+              memory: 6Gi
             limits:
               # Hard cap so a runaway L1 / transfer-buffer allocation gets this
               # pod OOM-killed (recoverable) instead of pushing the shared 128Gi
               # unified pool into an NVIDIA-driver OOM that hard-crashes the node.
-              memory: 16Gi
+              memory: 12Gi
           startupProbe:
             tcpSocket:
               port: 5555
@@ -170,11 +184,11 @@ metadata:
   namespace: vllm
   labels:
     app: lmcache
-    monitoring: "true"   # picked up by the ServiceMonitor in servicemonitors.yaml
+    monitoring: "true" # picked up by the ServiceMonitor in servicemonitors.yaml
 spec:
   selector:
     app: lmcache
-  clusterIP: None   # headless: the connector opens a direct ZMQ socket, no LB needed
+  clusterIP: None # headless: the connector opens a direct ZMQ socket, no LB needed
   ports:
     - name: zmq
       port: 5555

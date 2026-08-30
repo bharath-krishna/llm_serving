@@ -26,17 +26,41 @@ spec:
           command: ["/bin/bash", "-c"]
           args:
             - |
+              # --served-model-name takes nargs='+': the FIRST name is what the
+              # API reports, the rest are accepted aliases. The repo-ID alias is
+              # load-bearing for bench-nemotron/bench_config_permutator.json --
+              # long-doc-permutator sizes contexts in exact tokens, so it feeds
+              # `model` to AutoTokenizer.from_pretrained AND into the request
+              # payload. The served name is not a repo ID (tokenizer load fails);
+              # the repo ID alone would 404 here. Listing both satisfies each.
+              # NEVER put a `#` comment between the backslash-continued lines below.
+              # The trailing `\` joins the comment into the same logical line, the `#`
+              # comments out the remainder, and the command ENDS there -- silently
+              # dropping every remaining flag. That happened 2026-08-30: the engine came
+              # up healthy with no --kv-transfer-config (LMCache silently disconnected),
+              # no --reasoning-parser (chain-of-thought leaked into message.content) and
+              # no --kv-cache-memory-bytes (pool ballooned to 19.32 GiB). Comments go here.
+              #
+              # KV TIERING -- the GPU pool is capped deliberately SMALL relative to
+              # LMCache's L1. At 10 GiB it held 3,260,912 tokens while L1 (--l1-size-gb 4
+              # at LMCache's measured 11,799 B/token) holds 364,011: the backing tier was
+              # 9x SMALLER than what it backed, so nothing ever evicted (GPU KV usage
+              # 2.4%) and the external hit rate sat at 6.6% -- LMCache is queried only on
+              # a local miss, and with no eviction a local miss is content nobody has
+              # ever seen. Shrinking the pool inverts the pyramid the right way round.
+              # max-model-len must stay <= the pool's token capacity or vLLM won't start.
+              # REVERT: --max-model-len 262144 --kv-cache-memory-bytes 10737418240
               exec vllm serve nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 \
-                --served-model-name nemotron-3.5-lightning \
+                --served-model-name nemotron-3.5-lightning nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 \
                 --max-num-seqs 32 \
-                --max-model-len 262144 \
+                --max-model-len 131072 \
                 --enable-prefix-caching \
                 --async-scheduling \
                 --max-num-batched-tokens 2192 \
                 --mamba-backend flashinfer \
                 --mamba-ssm-cache-dtype float16 \
                 --gpu-memory-utilization 0.35 \
-                --kv-cache-memory-bytes 10737418240 \
+                --kv-cache-memory-bytes 536870912 \
                 --mamba-cache-mode align \
                 --enable-mamba-cache-stochastic-rounding \
                 --mamba-cache-philox-rounds 5 \

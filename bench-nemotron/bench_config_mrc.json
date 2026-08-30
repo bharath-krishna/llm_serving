@@ -12,6 +12,6 @@
   "mrc_chat_history_length": 20000,
   "mrc_user_input_length": 500,
   "mrc_output_length": 256,
-  "mrc_qps": 2.0,
+  "mrc_qps": 1.0,
   "mrc_duration": 180.0
 }

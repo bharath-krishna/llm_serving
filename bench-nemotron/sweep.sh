@@ -28,6 +28,7 @@ kubectl create configmap vllm-bench-config -n "$NS" \
   --from-file=bench_config_smoke.json \
   --from-file=bench_config_mrc.json \
   --from-file=bench_config_sweep.json \
+  --from-file=bench_config_permutator.json \
   --dry-run=client -o yaml | kubectl apply -f -
 
 kubectl delete pod "$POD" -n "$NS" --ignore-not-found --wait=true
