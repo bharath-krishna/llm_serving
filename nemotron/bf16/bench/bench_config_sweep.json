@@ -1,0 +1,16 @@
+{
+  "_comment": "BASE config for the concurrency sweep -- sweep-pod.yaml overwrites ldqa_num_inflight_requests per level and leaves everything else identical, so every level does exactly the same work. num_documents resolves to 8 docs x 3 queries = 24 requests per level (measured 2026-08-31 at tokens_per_gb_kvcache 174736; the same kv_cache_volume gave 7 docs at 173664, so the resolver is not a simple int() or ceil() of the quoted formula -- verify against the run). That is fewer than NVFP4's 27, and the difference is not arbitrary: offload volume is 6*16000*29,696 = 2.85 GB against a 4 GiB L1, and LMCache's bytes/token here is 2.52x NVFP4's, so matching NVFP4's document count would put 4.3 GB through a same-sized L1 and sustain the NVMe writeback that hard-reset this node. Compare levels within this sweep only -- it is NOT comparable to the NVFP4 sweep. MEASURED CONSTANTS (2026-08-31, from the registered engine via lmcache /status cache_context_meta, and from the engine's own KV layout): tokens_per_gb_kvcache 173664 (GPU KV pool is 81 blocks x 1072 tokens = 86,832 for a 512 MiB pool, i.e. 6,182 B/token engine-side); LMCache cache_size_per_token 29,696 B/token, which is 2.52x NVFP4's 11,799 -- NOT the 1.96x the KV-dtype ratio alone would suggest, because LMCache also stores the mamba recurrent state (29 layers in the reported layout: 23 mamba + 6 attention). Use 173,664 for POOL CAPACITY and 29,696 for OFFLOAD VOLUME; mixing them up sizes a run ~5x wrong. L1 is 4 GiB = 144,631 tokens = 1.67x the GPU pool, which is the inversion that makes the offload path reachable at all. LEVELS: NVFP4's sweep found the knee at 8 concurrent, collapse at 12, and a NODE CRASH at 16 (BENCHMARK-HANDOFF.md section 5). Those are NVFP4's numbers and are very likely OPTIMISTIC here: this engine's footprint is ~63.5 GiB against NVFP4's ~22.5, so there is roughly half the unified-memory headroom before the driver allocation failure that hard-resets this node. Treat 12 as unproven and run telemetry. AUTH: `model` MUST stay set -- the /v1/models auto-detect probe does not carry the bearer token and 401s against the authenticated endpoint.",
+  "workload": "long-doc-qa",
+  "engine_url": "http://vllm-nemotron-bf16.vllm.svc.cluster.local:8000",
+  "lmcache_url": "http://lmcache-http.vllm.svc.cluster.local",
+  "model": "nemotron-3.5-lightning-bf16",
+  "seed": 42,
+  "ignore_eos": true,
+  "kv_cache_volume": 0.553,
+  "tokens_per_gb_kvcache": 174736,
+  "ldqa_document_length": 16000,
+  "ldqa_query_per_document": 3,
+  "ldqa_shuffle_policy": "random",
+  "ldqa_num_inflight_requests": 1,
+  "ldqa_max_output_length": 128
+}

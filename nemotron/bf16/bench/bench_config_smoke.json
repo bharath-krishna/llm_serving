@@ -1,0 +1,16 @@
+{
+  "_comment": "SMOKE config -- the smallest run that still exercises the real long-doc-qa path end to end, AND the LMCache offload path with it. *** DO NOT TRUST THE REQUEST COUNT PREDICTED BY ARITHMETIC; READ IT OFF THE RUN. *** Two measured points with identical kv_cache_volume 0.553: at tokens_per_gb_kvcache 173664 the resolver produced 7 documents / 21 requests; at 174736 it produced 8 documents / 24 requests. int(0.553*173664/16000) = 6.00 and int(0.553*174736/16000) = 6.04, so neither int() nor ceil() explains either result. long_doc_qa.py's LongDocQAConfig.resolve does something else; the formula quoted in these comments is a rough guide to the SCALING, not a prediction. MEASURED 2026-08-31 at max-model-len 131072 (1 GiB pool, 6 GiB L1): 24/24 successful, 72.78 s, 384,520 input / 3,072 output tokens, mean TTFT 1,123 ms (P50 674, P90 2,099, P99 7,539), mean decode 27.3 tok/s. LMCache finished at 37 objects / 1.097 GiB of 6 GiB L1 (18.3%) with the L2 tier at 299 files / 8.9 GB -- LMCache writes through to L2 rather than only on eviction, which is why L2 grows even with L1 at 18%. The offload path demonstrably stores and spills. EARLIER POINT for comparison, at max-model-len 65536 (512 MiB pool, 4 GiB L1): 21/21, 62.27 s, 336,455 input tokens, mean TTFT 785.7 ms, decode 26.8 tok/s, L1 at 2.905 GiB of 4 GiB (72.6%). TTFT rose with the larger context because the working set per run grew; decode is unchanged. WHAT IT NO LONGER PROVES: at the old 512 MiB pool this config's working set was 1.11x the pool and evicted mildly, which exercised LMCache LOADS as well as stores. The pool is now 174,736 tokens and the working set is ~128,000, so it is 0.73x the pool and NOTHING EVICTS -- the run still proves stores, spills and the full request path, but a load can only happen across runs now, not within one. See ../README.md for why forcing eviction is no longer cheap on this box. Offload volume is ~3.8 GB against a 4.83 GB budget (75% of the 6 GiB L1), so nothing sustains the NVMe writeback that hard-reset this node on 2026-08-30. IN-CLUSTER URLS: this pod talks to the variant's Service directly rather than the public https://nemo35-lightning.krishb.in ingress, so a bench does not leave the node, is not shaped by haproxy timeouts, and cannot accidentally measure whichever variant happens to be live. AUTH: `model` MUST stay set -- lmcache bench sends OPENAI_API_KEY as a bearer token on /v1/chat/completions but NOT on its /v1/models auto-detect probe, which 401s against the authenticated endpoint.",
+  "workload": "long-doc-qa",
+  "engine_url": "http://vllm-nemotron-bf16.vllm.svc.cluster.local:8000",
+  "lmcache_url": "http://lmcache-http.vllm.svc.cluster.local",
+  "model": "nemotron-3.5-lightning-bf16",
+  "seed": 42,
+  "ignore_eos": true,
+  "kv_cache_volume": 0.553,
+  "tokens_per_gb_kvcache": 174736,
+  "ldqa_document_length": 16000,
+  "ldqa_query_per_document": 3,
+  "ldqa_shuffle_policy": "random",
+  "ldqa_num_inflight_requests": 2,
+  "ldqa_max_output_length": 128
+}

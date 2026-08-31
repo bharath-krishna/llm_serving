@@ -1,0 +1,16 @@
+{
+  "_comment": "*** GUARDED, AND NOW FOR A STRUCTURAL REASON: on this box, with these settings, there is no sizing that both oversubscribes the GPU KV pool and stays inside LMCache's L1. *** The arithmetic, after max-model-len went 65536 -> 131072 on 2026-08-31: the GPU pool is 174,736 tokens and L1 is 216,946 tokens (6 GiB / 29,696 B/token), so the offload budget is 0.75 * 6 GiB = 4.83 GB = 162,700 tokens. To force eviction the working set must exceed the 174,736-token pool -- but 174,736 tokens of offload is already 5.19 GB, past the budget before any oversubscription at all. At NVFP4's 1.6x it would be 8.30 GB, 1.29x the whole L1. WHY THIS GOT WORSE, NOT BETTER, WITH MORE CONTEXT: raising max-model-len doubled the pool (86,832 -> 174,736 tokens) while L1 rose only 1.5x in tokens (144,631 -> 216,946), because the pool is charged 6,144 B/token and L1 is charged 29,696 -- LMCache also stores the mamba recurrent state. The two tiers do not scale together. TO MAKE THIS RUNNABLE, pick one: (a) shrink --kv-cache-memory-bytes back toward 512 MiB, accepting a lower max-model-len, which is what makes the eviction regime cheap again; (b) raise --l1-size-gb to ~12 so the budget clears 8 GB, costing another 6 GiB of the shared 128 GiB pool; or (c) accept that this variant's eviction behaviour is characterised at the SHORT-context setting and run it there. Option (c) is the honest default -- the NVFP4 numbers it would be compared against were themselves taken at a 512 MiB pool. Sustained long-context load hard-reset this node on 2026-08-27 and 2026-08-30T07:04:05Z with an engine less than half this size; do not override this guard without ../../tools/start-telemetry.sh running on the node. AUTH: `model` MUST stay set.",
+  "workload": "long-doc-qa",
+  "engine_url": "http://vllm-nemotron-bf16.vllm.svc.cluster.local:8000",
+  "lmcache_url": "http://lmcache-http.vllm.svc.cluster.local",
+  "model": "nemotron-3.5-lightning-bf16",
+  "seed": 42,
+  "ignore_eos": true,
+  "kv_cache_volume": 0.737,
+  "tokens_per_gb_kvcache": 174736,
+  "ldqa_document_length": 16000,
+  "ldqa_query_per_document": 3,
+  "ldqa_shuffle_policy": "random",
+  "ldqa_num_inflight_requests": 2,
+  "ldqa_max_output_length": 128
+}

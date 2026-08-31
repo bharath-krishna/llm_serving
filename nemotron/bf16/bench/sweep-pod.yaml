@@ -1,0 +1,100 @@
+# Concurrency sweep for nemotron-3.5-lightning-bf16: one pod runs every level
+# sequentially so the engine is never restarted mid-sweep and levels stay
+# comparable. Driven by ./sweep.sh -- which rebuilds the ConfigMap and patches
+# LEVELS below. Applying this file directly runs the default levels.
+#
+# LEVELS is capped at 32 because the deployment runs --max-num-seqs 32; asking
+# for more just queues in the client and measures nothing new. The default stops
+# at 12 on purpose: N=16 hard-reset the node 102 s in on 2026-08-28
+# (BENCHMARK-HANDOFF.md section 5), so it is opt-in via ./sweep.sh "16".
+#
+# That threshold was found against NVFP4 and is very likely OPTIMISTIC here.
+# This engine's footprint is ~68 GiB against NVFP4's ~22.5, so there is roughly
+# half the unified-memory headroom before the driver allocation failure that
+# hard-resets this node. Treat even 12 as unproven and run telemetry.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: vllm-sweep-bf16
+  namespace: vllm
+  labels: { app: vllm-sweep-bf16, variant: bf16 }
+spec:
+  restartPolicy: Never
+  runtimeClassName: nvidia # same rootfs/CDI env; NO GPU requested
+  containers:
+    - name: sweep
+      image: vllm/vllm-openai:v0.27.1
+      command: ["/bin/bash", "-c"]
+      args:
+        - |
+          set -uo pipefail
+          RUN="/results/bf16/nemotron-sweep-$(date -u +%Y%m%dT%H%M%SZ)"
+          mkdir -p "$RUN"
+          # Markers are fsync'd on every write. A DGX Spark hard reset discards
+          # the page cache, which is how session 1 of the nemotron sweep lost all
+          # of its evidence -- see BENCHMARK-HANDOFF.md section 3. A truncated
+          # MARKERS.txt ending in a LEVEL-BEGIN with no END is the crash tell.
+          mark() { echo "$(date -u +%FT%T.%3NZ) $*" \
+            | dd of="$RUN/MARKERS.txt" oflag=append conv=notrunc,fsync status=none; }
+
+          mark "sweep start levels=$LEVELS base=$CONFIG_NAME"
+          for N in $LEVELS; do
+            mark "level $N BEGIN"
+            python3 -c "
+          import json,sys
+          d=json.load(open('/config/$CONFIG_NAME'))
+          d['ldqa_num_inflight_requests']=int(sys.argv[1])
+          json.dump(d,open(sys.argv[2],'w'),indent=2)
+          " "$N" "$RUN/config-c$N.json"
+
+            lmcache bench engine \
+              --config "$RUN/config-c$N.json" \
+              --no-interactive \
+              --output-dir "$RUN/c$N" \
+              --json 2>&1 | tee "$RUN/c$N.log"
+            mark "level $N END rc=$?"
+            # Let the engine drain and clocks settle before the next level, so a
+            # level is not measured against the tail of its predecessor.
+            sleep 30
+          done
+
+          mark "sweep COMPLETE"
+          echo "===================== SWEEP SUMMARY ====================="
+          for N in $LEVELS; do
+            echo "--- concurrency $N ---"
+            sed 's/\x1b\[[0-9;]*[A-Za-z]//g' "$RUN/c$N.log" 2>/dev/null \
+              | grep -E "Successful requests|Failed requests|Benchmark duration|Input throughput|Output throughput|Mean TTFT|P50 TTFT|P90 TTFT|P99 TTFT|Mean decode"
+          done | tee "$RUN/SUMMARY.txt"
+      env:
+        - name: LEVELS
+          value: "1 2 4 8 12"
+        - name: CONFIG_NAME
+          value: bench_config_sweep.json
+        - name: LMCACHE_DISABLE_BANNER
+          value: "1"
+        # Server reads VLLM_API_KEY, client sends OPENAI_API_KEY as its bearer
+        # token -- both from the SAME `vllm-auth` Secret key, so one rotation
+        # covers both. Without this every request 401s.
+        - name: OPENAI_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: vllm-auth
+              key: api-key
+        - name: HF_HOME
+          value: /hf
+        - name: HF_HUB_OFFLINE
+          value: "1"
+      volumeMounts:
+        - { name: config, mountPath: /config, readOnly: true }
+        - { name: hf, mountPath: /hf, readOnly: true }
+        - { name: results, mountPath: /results }
+      resources:
+        requests: { cpu: "2", memory: 4Gi }
+        limits: { cpu: "4", memory: 8Gi }
+  volumes:
+    - name: config
+      configMap: { name: vllm-bench-config-bf16 }
+    - name: hf
+      hostPath: { path: /home/bharath/.cache/huggingface, type: Directory }
+    - name: results
+      hostPath: { path: /var/lib/vllm-bench-results, type: DirectoryOrCreate }

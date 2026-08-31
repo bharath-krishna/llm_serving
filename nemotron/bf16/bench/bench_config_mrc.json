@@ -1,0 +1,17 @@
+{
+  "_comment": "*** GUARDED -- run.sh refuses this config on BF16. *** multi-round-chat. num_concurrent_users = kv_cache_volume*tokens_per_gb_kvcache/(shared+history) = 1.02*173664/22000 = 8, matching NVFP4's 8. Per-turn sizing is fine: rounds-per-session = qps*duration/num_users = 1.0*180/8 = 22.5, so the worst-case turn is 2000+20000+22.5*756 = ~39,010 tokens against a 65536 max-model-len -- 60% of the ceiling. THE PROBLEM IS CUMULATIVE OFFLOAD, NOT PER-TURN SIZE. This workload's Session.exchanges list grows forever, so the KV that passes through LMCache over the run is roughly 8 users * 39,010 tokens = 312,080 tokens = 9.27 GB at the measured 29,696 B/token -- 2.2x the 4 GiB L1. That sustains exactly the continuous /kv-l2 NVMe writeback that hard-reset this node. The same config on NVFP4 is 8*39,010*11,799 = 3.68 GB against a 4 GiB L1, which is why it has always been safe THERE and is not safe here. MEASURED CONSTANTS (2026-08-31, from the registered engine via lmcache /status cache_context_meta, and from the engine's own KV layout): tokens_per_gb_kvcache 173664 (GPU KV pool is 81 blocks x 1072 tokens = 86,832 for a 512 MiB pool, i.e. 6,182 B/token engine-side); LMCache cache_size_per_token 29,696 B/token, which is 2.52x NVFP4's 11,799 -- NOT the 1.96x the KV-dtype ratio alone would suggest, because LMCache also stores the mamba recurrent state (29 layers in the reported layout: 23 mamba + 6 attention). Use 173,664 for POOL CAPACITY and 29,696 for OFFLOAD VOLUME; mixing them up sizes a run ~5x wrong. L1 is 4 GiB = 144,631 tokens = 1.67x the GPU pool, which is the inversion that makes the offload path reachable at all. TO UNGUARD: re-derive num_concurrent_users and mrc_duration together so total offload stays under ~3 GB (about 101,000 tokens), then remove it from GUARDED_CONFIGS in run.sh. Note that cutting users raises rounds-per-session, which raises the per-turn peak toward max-model-len -- the two constraints pull against each other and both must be checked. AUTH: `model` MUST stay set.",
+  "workload": "multi-round-chat",
+  "engine_url": "http://vllm-nemotron-bf16.vllm.svc.cluster.local:8000",
+  "lmcache_url": "http://lmcache-http.vllm.svc.cluster.local",
+  "model": "nemotron-3.5-lightning-bf16",
+  "seed": 42,
+  "ignore_eos": true,
+  "kv_cache_volume": 1.02,
+  "tokens_per_gb_kvcache": 174736,
+  "mrc_shared_prompt_length": 2000,
+  "mrc_chat_history_length": 20000,
+  "mrc_user_input_length": 500,
+  "mrc_output_length": 256,
+  "mrc_qps": 1.0,
+  "mrc_duration": 180.0
+}

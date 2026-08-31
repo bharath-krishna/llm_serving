@@ -1,0 +1,256 @@
+# NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16 -- the heavyweight variant.
+#
+# WHY SEPARATE, AND WHY SCALED TO ZERO
+# This node has ONE GPU, and both variants request `nvidia.com/gpu: "1"`, so
+# only one can ever be Running -- the other stays Pending forever. They also
+# cannot coexist on memory: BF16 weights load 58.93 GiB against NVFP4's 17.86 GiB
+# (measured), and this GB10 has a single 128 GiB pool shared by GPU, host and OS.
+# Committed at replicas: 0 so applying this file never disturbs the working
+# NVFP4 engine. Switch with ../switch.sh, which sequences the scale-down,
+# the wait, and the matching LMCache server:
+#
+#   ../switch.sh bf16      # and ../switch.sh nvfp4 to go back
+#
+# Expect ~6 min for the swap: the BF16 checkpoint is 61.31 GiB and took 334 s to
+# load vs 103 s for NVFP4.
+#
+# ../switch.sh also moves the LMCache server, because there is one PER VARIANT
+# (./lmcache.yaml here, ../nvfp4/lmcache.yaml there). They cannot be shared: the
+# server's --chunk-size must equal the engine's unified block size, which is 1072
+# here and 2128 there. Exactly one server runs at a time.
+#
+# HOW THE PUBLIC URL FINDS THIS POD. The pod label `serving: nemotron` is what
+# ../common/service-active.yaml selects on, and that Service is what the Ingress
+# points at permanently. There is deliberately NO Ingress in this file -- on
+# 2026-08-31 this deployment shipped one for nemo35-lightning.krishb.in,
+# haproxy-ingress resolved the host collision to the OLDER ingress, and the
+# public URL served 503s while BF16 was healthy behind the loser. See
+# ../common/ingress.yaml.
+#
+# SERVED MODEL NAMES. Three, and the order matters. `/v1/models` reports the
+# FIRST one, so `nemotron-3.5-lightning-bf16` leads and the API stays honest
+# about which variant answered. The plain `nemotron-3.5-lightning` alias follows
+# so a client that hardcodes the NVFP4 name keeps working after a switch -- same
+# URL, same key, same model string. The repo ID is third because
+# bench/bench_config_permutator.json feeds `model` to
+# AutoTokenizer.from_pretrained AND into the request payload; the served name is
+# not a repo ID (tokenizer load fails) and the repo ID alone would 404.
+#
+# MAX-MODEL-LEN 131072 -- same as NVFP4, so the two variants are comparable.
+#
+# The binding constraint is that the GPU KV pool must hold ONE full-length
+# request; vLLM refuses to start otherwise and its error names the exact ceiling
+# ("estimated maximum model length is N"). Attention KV costs, per token:
+#
+#   2 (K+V) x num_kv_heads(2) x head_dim(128) x sizeof(bf16) x attn_layers(6)
+#     = 6,144 B/token
+#
+# Verified against the running engine at the previous setting: 81 blocks x 1072
+# tokens x 6,144 = 508.8 MiB, matching the 512 MiB pool that was configured.
+# NVFP4 pays half this (fp8_e4m3 KV, 1 byte/elem), which is the whole reason this
+# variant needed a bigger pool to reach the same context length.
+#
+# MAMBA STATE DOES NOT GROW WITH CONTEXT. It is sized by --max-num-seqs (32), not
+# by max-model-len, so raising context is purely an attention-KV cost. That is
+# what makes 131072 affordable here at all.
+#
+# SIZING TABLE (min pool = ceil(len/1072) blocks x 1072 x 6,144; L1 must hold MORE
+# TOKENS than the pool it backs, see below, and at 29,696 B/token that is what
+# actually costs memory -- not the pool):
+#
+#   max-model-len   min pool   suggested pool   L1 needed        extra memory
+#          65,536    389 MiB          512 MiB   2.4 GiB          --
+#          98,304    578 MiB          768 MiB   3.6 GiB          +0.25 GiB
+#     >>> 131,072    773 MiB            1 GiB   4.8 GiB -> 6     +2.5 GiB   <<<
+#         262,144    1.5 GiB            2 GiB   9.7 GiB -> 10    +7.5 GiB
+#
+# To go to 262144, raise --kv-cache-memory-bytes to 2147483648 AND
+# ./lmcache.yaml --l1-size-gb to 10, together -- raising the pool alone silently
+# breaks the tiering inversion below.
+#
+# --kv-cache-dtype fp8 would halve the per-token cost and buy all of this for
+# free, but this checkpoint ships no KV scales, so that is an accuracy trade
+# rather than a win.
+#
+# KV POOL: 1 GiB (1073741824 B) -> 174,762 tokens, 33% headroom over 131072.
+# It must ALSO stay smaller, in tokens, than LMCache's L1 tier -- 174,762 against
+# L1's 216,946 at 6 GiB (both measured/derived from the same constants). That
+# inversion is the point: LMCache is queried only on a LOCAL prefix-cache miss,
+# so if the pool is large enough that nothing ever evicts, a local miss is always
+# content nobody has seen and the external hit rate collapses (6.6% measured on
+# NVFP4 at a 10 GiB pool). The backing tier must be BIGGER than what it backs.
+#
+# Do not confuse the engine's 6,144 B/token with LMCache's 29,696 B/token for the
+# same model: LMCache also stores the mamba recurrent state (29 layers in its
+# reported layout: 23 mamba + 6 attention). The bench configs need the LMCache
+# figure for offload budgets and the engine figure for pool capacity, and mixing
+# them up is how a run gets sized ~5x wrong.
+#
+# LMCACHE IS ON, and --max-num-batched-tokens 1072 is load-bearing because of it.
+# validate_mamba_step_alignment (lmcache_mp_connector.py:145) pins that flag to
+# [block_size, 2*block_size) = [1072, 2144) and fails the engine at startup
+# otherwise. That check is what rejects NVFP4's 2192 here.
+#
+# BLOCK SIZE 1072 IS MEASURED, not derived -- 2026-08-31T07:47:33Z, from this
+# engine's own log: "Setting attention block size to 1072 tokens to ensure that
+# attention page size is >= mamba page size" (interface.py:911). It follows from
+# the model's mamba state size and TWO dtype choices:
+#
+#   block = ceil16( mamba_state_elems_per_layer * sizeof(mamba_ssm_cache_dtype)
+#                   ------------------------------------------------------- )
+#                        2 * num_kv_heads * head_dim * sizeof(kv_cache_dtype)
+#
+#   542,720 * 2  /  (2 * 2 * 128 * 2)  =  1060.0  ->  ceil16  ->  1072
+#
+# so --mamba-ssm-cache-dtype float16 below is as load-bearing as the KV dtype:
+# with float32 this model's block becomes 2128, the same as NVFP4's. The server
+# side of this constraint is ./lmcache.yaml --chunk-size 1072.
+#
+# 1072 is also what mamba_cache_mode=align wants independently -- it snapshots
+# recurrent state only at the end of a scheduler step, so a step advancing more
+# than one block would leave null-block holes in vLLM's OWN prefix cache. No
+# throughput cost: the block-aligned split caps a step at one block regardless.
+#
+# CRASH BUDGET IS TIGHTER HERE. Engine footprint is ~64 GiB (58.93 weights +
+# ~3.4 activation + ~0.7 CUDA graphs + 1.0 KV) vs ~22.5 GiB on NVFP4. Add
+# LMCache's 6 GiB pinned L1 and OS/k8s (~20 GiB) and roughly half the headroom
+# NVFP4 had remains before unified memory is exhausted -- and exhaustion here
+# hard-resets the node rather than OOM-killing a pod (BENCHMARK-HANDOFF.md
+# section 3). The bench guards in bench/run.sh are lowered accordingly.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-nemotron-bf16
+  namespace: vllm
+  labels:
+    app: vllm-nemotron-bf16
+spec:
+  replicas: 0 # see header -- single GPU, switch with ../switch.sh
+  selector:
+    matchLabels:
+      app: vllm-nemotron-bf16
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: vllm-nemotron-bf16
+        # Selected by ../common/service-active.yaml. Both variants carry it;
+        # only one pod is ever Running, so the live endpoint is unambiguous.
+        serving: nemotron
+        # Copied onto every scraped series by the ServiceMonitor's
+        # podTargetLabels, so a metrics query can tell the variants apart.
+        variant: bf16
+    spec:
+      runtimeClassName: nvidia
+      hostIPC: true
+      containers:
+        - name: vllm
+          image: vllm/vllm-openai:v0.27.1
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              # NEVER put a `#` comment between the backslash-continued lines below.
+              # The trailing `\` joins the comment into the same logical line, the `#`
+              # comments out the remainder, and the command ENDS there -- silently
+              # dropping every remaining flag, including --reasoning-parser (chain-of-
+              # thought leaks into message.content). The engine still comes up
+              # "healthy". Comments go here.
+              exec vllm serve nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16 \
+                --served-model-name nemotron-3.5-lightning-bf16 nemotron-3.5-lightning nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16 \
+                --max-num-seqs 32 \
+                --max-model-len 131072 \
+                --enable-prefix-caching \
+                --async-scheduling \
+                --max-num-batched-tokens 1072 \
+                --mamba-backend flashinfer \
+                --mamba-ssm-cache-dtype float16 \
+                --gpu-memory-utilization 0.60 \
+                --kv-cache-memory-bytes 1073741824 \
+                --mamba-cache-mode align \
+                --enable-mamba-cache-stochastic-rounding \
+                --mamba-cache-philox-rounds 5 \
+                --reasoning-parser nemotron_v3 \
+                --enable-auto-tool-choice \
+                --tool-call-parser qwen3_coder \
+                --host 0.0.0.0 \
+                --port 8000 \
+                --kv-transfer-config '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both", "kv_connector_extra_config": {"lmcache.mp.host": "tcp://lmcache.vllm.svc.cluster.local", "lmcache.mp.port": 5555}}'
+          env:
+            # Same shared vllm-auth Secret as the NVFP4 deployment, so a rotation
+            # covers both and the bench pods need no change. See
+            # ../common/SECRETS.md.
+            - name: VLLM_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: vllm-auth
+                  key: api-key
+          ports:
+            - containerPort: 8000
+              name: http
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+              # 48Gi (the NVFP4 value) would be BELOW this model's 58.93 GiB of
+              # weights. Raised to 76Gi to cover ~64 GiB of engine plus margin,
+              # while still catching host-side runaway with a pod restart rather
+              # than letting the box lock up. --gpu-memory-utilization is 0.60
+              # here (not 0.35) for two reasons: 0.35 of 121.69 GiB is 42.59,
+              # which the weights alone already exceed, making the ceiling
+              # incoherent; and at 0.55 the ~64 GiB engine sits against a 66.9 GiB
+              # ceiling, which is too little slack once the KV pool is 1 GiB.
+              # 0.60 gives 73.0 GiB.
+              memory: 76Gi
+            requests:
+              nvidia.com/gpu: "1"
+              memory: 64Gi
+          # WITHOUT THESE the container counts as Ready the moment it starts, so
+          # `kubectl rollout status` returns in seconds, the Service takes an
+          # endpoint immediately, and the public URL serves 503s for the whole
+          # 334s the checkpoint takes to load. The startupProbe is what buys
+          # that load window; readiness then keeps the endpoint out of
+          # vllm-nemotron-active until the engine can actually answer.
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            periodSeconds: 10
+            failureThreshold: 90 # 900s budget -- checkpoint load is ~334s
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            periodSeconds: 10
+            failureThreshold: 3
+          volumeMounts:
+            - mountPath: /root/.cache/huggingface
+              name: huggingface-cache
+      volumes:
+        - name: huggingface-cache
+          hostPath:
+            path: /home/bharath/.cache/huggingface
+            type: DirectoryOrCreate
+      # No /dev/shm emptyDir: hostIPC: true already shares the host's /dev/shm,
+      # which is how LMCacheMPConnector's CUDA-IPC transfer would reach the
+      # lmcache-bf16 pod (also hostIPC: true). An emptyDir would give this pod a
+      # PRIVATE /dev/shm and break that channel.
+---
+# Per-variant Service. NOT what the public URL uses -- that goes through
+# ../common/service-active.yaml. This one exists so benchmarks can address this
+# specific engine by name and a result can never be misattributed to the other
+# variant.
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-nemotron-bf16
+  namespace: vllm
+  labels:
+    app: vllm-nemotron-bf16
+spec:
+  selector:
+    app: vllm-nemotron-bf16
+  ports:
+    - port: 8000
+      targetPort: 8000
+      name: http
+  type: ClusterIP

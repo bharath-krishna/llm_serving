@@ -1,0 +1,272 @@
+# LMCache multiprocess (MP) server for the BF16 variant.
+#
+# WHY THIS IS PER-VARIANT AND NOT SHARED
+# --chunk-size must EQUAL vLLM's unified block size, and that block size is
+# derived from the model architecture plus TWO dtype flags on the engine:
+#
+#   block = ceil16( mamba_state_elems_per_layer * sizeof(mamba_ssm_cache_dtype)
+#                   ------------------------------------------------------- )
+#                        2 * num_kv_heads * head_dim * sizeof(kv_cache_dtype)
+#
+# For this model (542,720 mamba state elems/layer, 2 KV heads, head_dim 128):
+#
+#   kv dtype    ssm dtype   attn B/tok/layer   raw     block
+#   fp8_e4m3    float16                  512  2120.0    2128   <- NVFP4
+#   bf16        float16                 1024  1060.0    1072   <- BF16
+#
+# Both verified against the engine's own "Setting attention block size to N
+# tokens" line (interface.py:911). A server can hold only ONE chunk size, so a
+# shared server would have to be reconfigured and restarted on every variant
+# switch -- and restarting it drops the live engine's GPU-context registration.
+# One server per variant, scaled with its engine by ../switch.sh, avoids that
+# entirely. Each also keeps its own L2 directory, so neither has to be cleared.
+#
+# The Services and the Ingress are NOT here -- they are in ../common/
+# (lmcache-services.yaml) and select on the pod label `serving: lmcache`, so the
+# names `lmcache` and `lmcache-http` follow whichever server is up. That is what
+# lets the engine's --kv-transfer-config, the shared UI's nginx upstream, and
+# every bench config's lmcache_url stay constant across a switch.
+#
+# EXACTLY ONE of these servers may run at a time -- two would both match that
+# label and the ZMQ connector would pick an endpoint arbitrarily. ../switch.sh
+# enforces the ordering (old engine down, old server down, new server up, new
+# engine up); do not scale them by hand.
+#
+# PREREQUISITE ON THE ENGINE: --max-num-batched-tokens must be in
+# [chunk-size, 2*chunk-size) -- 1072 against a 1072 chunk here. validate_mamba_step_alignment
+# (lmcache_mp_connector.py:145) checks it on connect and fails the engine at
+# startup on a mismatch, loudly rather than silently.
+#
+# Confirm the engine actually registered, rather than assuming -- each restart
+# registers a NEW GPU id and the old registration lingers (the reaper is
+# disabled, see --worker-reap-timeout-seconds):
+#
+#   curl -s https://lmcache.krishb.in/status | jq .registered_gpu_ids
+#
+# ─── Deviations from the upstream `docker run lmcache/standalone:nightly` recipe ───
+#
+#  1. IMAGE: `lmcache/standalone:nightly` is published amd64-only — it will not run
+#     on this arm64 node (DGX Spark / GB10). This uses `vllm/vllm-openai:v0.27.1`
+#     instead, which is arm64 and ships the SAME LMCache (0.5.3) that the engine
+#     container has bundled — so the MP wire protocol matches exactly. The server
+#     entrypoint is the module (`python3 -m lmcache.v1.multiprocess.server`); the
+#     `lmcache server` CLI shim only exists in the standalone image.
+#
+#  2. `--network host`  → replaced by the ClusterIP Service below. The connector
+#     reaches the server over ZeroMQ at the Service DNS name; no host networking.
+#
+#  3. `--ipc host`      → `hostIPC: true` (needed for CUDA IPC + POSIX /dev/shm,
+#     which is how KV blocks actually move — it is strictly node-local).
+#
+#  4. `--gpus all`      → the single GPU is already claimed by the engine pod, so
+#     this pod cannot request `nvidia.com/gpu`. The pod annotation
+#     `cdi.k8s.io/lmcache: nvidia.com/gpu=0` injects GPU device nodes + driver libs
+#     via CDI WITHOUT consuming the allocatable count (the node's device plugin is
+#     CDI-only, so NVIDIA_VISIBLE_DEVICES does nothing). Verified on this node.
+#
+#  5. `--port 6555`     → 5555, to match `lmcache.mp.port` in the engine's
+#     --kv-transfer-config (../nvfp4/deployment.yaml).
+#
+#  6. `--chunk-size 1072 --separate-object-groups` added: REQUIRED for the Nemotron
+#     hybrid Mamba+attention model. 1072 is this variant's block size, measured
+#     2026-08-31T07:47:33Z ("Setting attention block size to 1072 tokens to
+#     ensure that attention page size is >= mamba page size", interface.py:911);
+#     --separate-object-groups is required by the hybrid model class,
+#     independent of sizing.
+#
+#  7. TIERING: L1 is a 6Gi pinned-DRAM hot tier; cold blocks spill to an `fs` L2
+#     adapter on the node's NVMe (`/kv-l2/bf16` → hostPath). A large DRAM-only L1
+#     (the original 60Gi) starves the model — on this unified-memory GB10 the GPU
+#     and L1 draw from the same 128Gi pool.
+#
+#     6Gi IS A DERIVED FLOOR, not a comfort setting. L1 must hold more tokens than
+#     the GPU KV pool it backs, or nothing it stores can ever be a hit -- LMCache
+#     is queried only on a local miss, and if the pool never evicts, a local miss
+#     is always content nobody has seen. From the registered engine's own report
+#     (lmcache /status -> cache_context_meta, 2026-08-31):
+#
+#       LMCache cache_size_per_token   29,696 B    (NVFP4's is 11,799 -- 2.52x)
+#
+#     L1 SIZE IS THEREFORE A FUNCTION OF THE ENGINE'S --kv-cache-memory-bytes.
+#     Against the 1 GiB pool in ./deployment.yaml (174,762 tokens at 6,144 B/token):
+#
+#       L1  4Gi  ->  4294967296 / 29696 = 144,631 tokens   0.83x the pool  WRONG WAY
+#       L1  6Gi  ->  6442450944 / 29696 = 216,946 tokens   1.24x the pool  correct
+#
+#     History worth keeping: at the earlier 512 MiB pool (86,832 tokens) a 2Gi L1
+#     was tried first and measurement rejected it for exactly the same reason
+#     (72,315 tokens, 0.83x). RAISING THE POOL WITHOUT RAISING L1 REPRODUCES THAT
+#     BUG -- the two move together, always. The sizing table in ./deployment.yaml
+#     lists the pairs.
+#
+#     Note the 2.52x bytes/token ratio: LMCache counts the mamba recurrent state
+#     as well as attention KV (29 layers in the reported layout: 23 mamba + 6
+#     attention), so it does NOT scale with the KV dtype alone the way the
+#     engine-side 6,144 B/token does. That is why L1 grows faster than the pool.
+#
+#     Cost check: engine ~64 GiB + 6 GiB L1 + OS/k8s ~20 GiB against the shared
+#     128 GiB pool. Measured 103.21 GiB available with BF16 loaded at the previous
+#     settings, so this fits with room; it is not free, and it is why the bench
+#     budgets are what they are.
+#
+#     GPUDirect Storage (`--gds-l1-path`) — the obvious way to put L1 on NVMe —
+#     is NOT usable here: (a) the `cufile` Python bindings are absent from this
+#     image, (b) `nvidia-fs` is not loaded and has no build for the running
+#     kernel 6.17.0-1026-nvidia, so cuFile could only run in bounce-buffer compat
+#     mode, and (c) on unified memory there is no discrete VRAM for GDS to DMA
+#     into, so it buys nothing over the `fs` L2 adapter anyway.
+#
+# ─── PREREQUISITES in an engine deployment for this to actually work ───
+#
+#  A. `--max-num-batched-tokens` in [1072, 2144) — 1072 in ./deployment.yaml.
+#     Otherwise the engine crashes with "Mamba-hybrid models with LMCache
+#     require ... Set --max-num-batched-tokens N".
+#
+#  B. No `dshm` emptyDir volume / `/dev/shm` mount on the engine pod. With
+#     `hostIPC: true` the container already sees the host's /dev/shm; an emptyDir
+#     mounted over it gives the pod a PRIVATE /dev/shm and the cross-pod
+#     shared-memory channel to this server breaks.
+#
+#  C. No `--speculative_config.*` (DSpark). The DSpark draft model adds a
+#     1024-token sliding-window KV group, and LMCache (through at least 0.5.4)
+#     requires the sliding window to be a multiple of the block size —
+#     1024 % 2192 ≠ 0, so REGISTER_KV_CACHE fails and the engine hangs. DSpark and
+#     LMCache MP are mutually exclusive on this model.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: lmcache-bf16
+  namespace: vllm
+  labels:
+    app: lmcache-bf16
+spec:
+  # Committed at 0 to match ./deployment.yaml -- applying every file must never
+  # leave two LMCache servers matching `serving: lmcache`, nor two engines
+  # contending for the single GPU. ../switch.sh moves this and the engine
+  # together.
+  replicas: 0
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: lmcache-bf16
+  template:
+    metadata:
+      labels:
+        app: lmcache-bf16
+        # Selected by ../common/lmcache-services.yaml -- this is what keeps the
+        # `lmcache` / `lmcache-http` names pointing at the live server.
+        serving: lmcache
+        variant: bf16
+      annotations:
+        # CDI GPU injection without a resource request — see note 4 above.
+        cdi.k8s.io/lmcache: "nvidia.com/gpu=0"
+    spec:
+      runtimeClassName: nvidia
+      hostIPC: true
+      containers:
+        - name: lmcache-server
+          image: vllm/vllm-openai:v0.27.1
+          command:
+            # http_server = the same ZMQ MP server + a FastAPI frontend on
+            # --http-port exposing /status, /healthcheck, /metrics. `lmcache
+            # bench engine` needs /status to auto-resolve tokens-per-GB.
+            - python3
+            - -m
+            - lmcache.v1.multiprocess.http_server
+            - --http-host
+            - "0.0.0.0"
+            - --http-port
+            - "8080"
+            - --host
+            - "0.0.0.0"
+            - --port
+            - "5555"
+            # L1 = hot tier in pinned DRAM. Keep it SMALL: on this unified-memory
+            # GB10 every GB here is a GB the vLLM engine cannot use, and a 60Gi L1
+            # starved the model ("Free memory on device cuda:0 ... less than
+            # desired GPU memory utilization").
+            - --l1-size-gb
+            - "6"
+            - --eviction-policy
+            - LRU
+            - --max-workers
+            - "4"
+            # MUST equal this variant's block size. Measured 2026-08-31, not
+            # derived -- see the derivation table in the header.
+            - --chunk-size
+            - "1072"
+            - --separate-object-groups
+            - --supported-transfer-mode
+            - lmcache_driven
+            # Disable worker reaping. The reaper judges never-pinged instances
+            # against worker-registration-grace-seconds (default 3600) and the
+            # vLLM-side heartbeat that would prove liveness NEVER RUNS in
+            # lmcache 0.5.3: _ensure_heartbeat_started() guards on
+            # `if self._heartbeats is not None: return`, but _heartbeats is
+            # initialised to {} -- always not-None, so the thread is never
+            # started (and its call site also omits instance_id, which the
+            # server's PING handler requires to refresh liveness). Net effect:
+            # any engine idle for an hour gets its GPU context reaped, and every
+            # later request fails "No GPU context registered for instance ID".
+            # That is exactly what happened 2026-08-30 09:13:13Z. 0 disables the
+            # reaper thread entirely.
+            #
+            # Consequence: registrations from previous engines are never cleaned
+            # up on their own, so /status accumulates dead GPU ids across engine
+            # restarts. Scaling this server to 0 on a variant switch (which
+            # ../switch.sh does) is what actually clears them.
+            - --worker-reap-timeout-seconds
+            - "0"
+            # L2 = cold tier on NVMe (ext4, ~1.3 TB free). Blocks evicted from the
+            # 6Gi L1 land here instead of being dropped, so the effective cache
+            # is disk-sized without spending DRAM. Plain buffered file I/O — no
+            # GPUDirect Storage (see the GDS note in the header).
+            #
+            # Variant-scoped path: the other variant's chunks are a different
+            # size AND a different KV dtype, so they must not share a directory.
+            # Because each server owns its own, neither has to be cleared on a
+            # switch -- a warm L2 survives being switched away from and back.
+            - --l2-adapter
+            - '{"type":"fs","base_path":"/kv-l2/bf16"}'
+          env:
+            - name: LMCACHE_LOG_LEVEL
+              value: "INFO" # DEBUG to verify store/load activity on bringup
+          volumeMounts:
+            - name: kv-l2
+              mountPath: /kv-l2
+          ports:
+            - name: zmq
+              containerPort: 5555
+            - name: http
+              containerPort: 8080
+          resources:
+            requests:
+              cpu: "4"
+              # --l1-size-gb 6 (pinned DRAM) + worker/runtime overhead. L2 spills
+              # to the NVMe hostPath below and does not count here.
+              memory: 8Gi
+            limits:
+              # Hard cap so a runaway L1 / transfer-buffer allocation gets this
+              # pod OOM-killed (recoverable) instead of pushing the shared 128Gi
+              # unified pool into an NVIDIA-driver OOM that hard-crashes the node.
+              memory: 16Gi
+          startupProbe:
+            tcpSocket:
+              port: 5555
+            initialDelaySeconds: 5
+            periodSeconds: 3
+            failureThreshold: 40
+          livenessProbe:
+            tcpSocket:
+              port: 5555
+            periodSeconds: 15
+            failureThreshold: 4
+      volumes:
+        # Cold KV tier on the node's NVMe (ext4 root fs). Survives pod restarts
+        # and variant switches; `rm -rf /var/lib/lmcache-l2/nvfp4/*` on the node
+        # to clear just this variant's tier.
+        - name: kv-l2
+          hostPath:
+            path: /var/lib/lmcache-l2
+            type: DirectoryOrCreate

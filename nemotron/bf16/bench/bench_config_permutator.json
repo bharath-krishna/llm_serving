@@ -1,0 +1,15 @@
+{
+  "_comment": "long-doc-permutator sends the same context documents in different orders. LMCache IS enabled on this variant, so the offload path it targets exists. It is no longer blanket-guarded: run.sh's preflight now has the real bytes/token and sizes it directly. Current sizing is 4 * (1000 + 3*3000) = 40,000 tokens * 29,696 = 1.19 GB, 28% of the 4 GiB L1. Read the NVFP4 copy's _comment before using it -- in particular: reordering does NOT produce relocatable reuse (LMCache chain-hashes every chunk with prefix_hash, token_database.py:269, so moving a context changes its key and every key after it), and the workload must be sized by OFFLOAD BYTES rather than by the GPU pool. MEASURED CONSTANTS (2026-08-31, from the registered engine via lmcache /status cache_context_meta, and from the engine's own KV layout): tokens_per_gb_kvcache 173664 (GPU KV pool is 81 blocks x 1072 tokens = 86,832 for a 512 MiB pool, i.e. 6,182 B/token engine-side); LMCache cache_size_per_token 29,696 B/token, which is 2.52x NVFP4's 11,799 -- NOT the 1.96x the KV-dtype ratio alone would suggest, because LMCache also stores the mamba recurrent state (29 layers in the reported layout: 23 mamba + 6 attention). Use 173,664 for POOL CAPACITY and 29,696 for OFFLOAD VOLUME; mixing them up sizes a run ~5x wrong. L1 is 4 GiB = 144,631 tokens = 1.67x the GPU pool, which is the inversion that makes the offload path reachable at all. MODEL MUST BE THE HF REPO ID: this workload sizes contexts in exact tokens, so it calls AutoTokenizer.from_pretrained(model) (tokenizers.py:104) on the SAME string it puts in the request payload (request_sender.py:240); the served name is not a repo ID so the tokenizer load fails, and the repo ID alone would 404 unless ../deployment.yaml lists it as an additional --served-model-name (it does). UPSTREAM BUG WORKAROUND -- ldqa_max_output_length: long-doc-permutator has no output-length knob and ignores this value, but it MUST be present or the run dies with \"max output length cannot be specified for the 'long-doc-permutator' workload\". The schema item (interactive/schema.py:286) is conditioned on workload==long-doc-qa and to_namespace() only applies a schema default when the condition holds, so otherwise it resolves to None; command.py:540 uses '!= 128' as its was-this-explicitly-set sentinel and None trips it. Setting it to exactly 128 keeps the sentinel quiet. Do NOT 'clean up' this key.",
+  "workload": "long-doc-permutator",
+  "engine_url": "http://vllm-nemotron-bf16.vllm.svc.cluster.local:8000",
+  "lmcache_url": "http://lmcache-http.vllm.svc.cluster.local",
+  "model": "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16",
+  "seed": 42,
+  "ignore_eos": true,
+  "ldp_num_contexts": 3,
+  "ldp_context_length": 3000,
+  "ldp_system_prompt_length": 1000,
+  "ldp_num_permutations": 4,
+  "ldp_num_inflight_requests": 1,
+  "ldqa_max_output_length": 128
+}
