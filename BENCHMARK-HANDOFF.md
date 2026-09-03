@@ -1,5 +1,16 @@
 # vLLM concurrent-user benchmark — handoff
 
+> **Scope: the NVFP4 variant only.** Every number here — the 2128 block size, the
+> ~326,000 KV tokens/GiB, the 17.85 GiB of weights, the concurrency knee at 8 and
+> the crash at 16 — was measured against
+> `NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4`. A BF16 variant now exists
+> (`nemotron/bf16/`) with roughly 3× the weights and ~1.96× the KV bytes per
+> token; none of these constants carry over to it. See `nemotron/README.md`.
+>
+> Object and path names were reorganised on 2026-08-31: `vllm-nemotron` is now
+> `vllm-nemotron-nvfp4`, and `bench-nemotron/` is now `nemotron/nvfp4/bench/`
+> plus `nemotron/tools/`. Historical log excerpts below still show the old names.
+
 **Date:** 2026-08-28 (updated after instrumented run #2, 09:27–09:45 PDT)
 **Node:** `spark-45f7` — NVIDIA DGX Spark (GB10, arm64, single iGPU, 128 GB unified memory)
 **Goal:** measure how many concurrent users the vLLM deployment of NemotronH can serve
@@ -16,8 +27,8 @@ Paused by user; next step is the clock-lock experiment in §10.**
 
 - vLLM serves `nemotron-3.5-lightning` (NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4,
   hybrid Mamba2+attention) on a single GB10.
-- Concurrency sweep via `vllm bench serve` from a separate pod (`bench-nemotron/conc_sweep.sh`,
-  resume variant `bench-nemotron/conc_sweep_resume.sh`).
+- Concurrency sweep via `vllm bench serve` from a separate pod (`nemotron/nvfp4/bench/conc_sweep.sh`,
+  resume variant `nemotron/nvfp4/bench/conc_sweep_resume.sh`).
 - **Results: concurrency 1, 4, 8, 12 — see §5.**
   - Throughput peaks at **N=8 (228 out tok/s)** and then **COLLAPSES to 125 tok/s at N=12**
     — it does not merely flatten.
@@ -126,7 +137,7 @@ Session 2 armed netconsole (kernel printk shipped over UDP to a laptop, so it is
 *transmitted* rather than written — it survives a reset that discards the page cache).
 
 - netconsole was **verified working**: manual `echo ... > /dev/kmsg` test messages arrived
-  at the collector (`bench-nemotron/crash-evidence-2026-08-28/netconsole.log`).
+  at the collector (`nemotron/nvfp4/evidence/crash-evidence-2026-08-28/netconsole.log`).
 - At the crash it delivered **zero bytes**.
 
 The kernel printed **nothing at all** before the reset. That positively excludes kernel
@@ -199,10 +210,10 @@ only lever available is clock capping — see §10.
 
 ## 4. Current deployment (the CAPPED config the benchmark ran against)
 
-Full manifests are in the repo root: `nemotron-deployment.yaml`, `lmcache-deployment.yaml`.
+Full manifests: `nemotron/nvfp4/deployment.yaml`, `nemotron/common/lmcache.yaml`.
 These already contain the 2026-08-28 memory caps. Key lines:
 
-### `nemotron-deployment.yaml` — Deployment `vllm-nemotron`, ns `vllm`
+### `nemotron/nvfp4/deployment.yaml` — Deployment `vllm-nemotron-nvfp4`, ns `vllm`
 
 ```
 image: vllm/vllm-openai:v0.27.1
@@ -241,7 +252,7 @@ volumes: hostPath /home/bharath/.cache/huggingface -> /root/.cache/huggingface
 Service vllm-nemotron :8000 ; Ingress hosts nemotron.local, nemo35-lightning.krishb.in
 ```
 
-### `lmcache-deployment.yaml` — Deployment `lmcache`, ns `vllm`
+### `nemotron/common/lmcache.yaml` — Deployment `lmcache`, ns `vllm`
 
 ```
 image: vllm/vllm-openai:v0.27.1 ; runtimeClassName: nvidia ; hostIPC: true
@@ -315,7 +326,7 @@ Mean ITL: 35.68 ms      P50: 31.12     P90: 41.84     P99: 132.77
 Mean E2EL: 20781.69 ms  P50: 20745.58  P90: 27219.96  P99: 29742.35
 ```
 
-N=12 raw JSON/log are preserved at `bench-nemotron/crash-evidence-2026-08-28/conc-12.{json,log}`.
+N=12 raw JSON/log are preserved at `nemotron/nvfp4/evidence/crash-evidence-2026-08-28/conc-12.{json,log}`.
 
 ---
 
@@ -360,18 +371,18 @@ only pays off under heavy multi-user KV eviction. Since it also forces the tiny
 ### 7a. Bring up the model + bench pod
 
 ```bash
-kubectl apply -f nemotron-deployment.yaml
-kubectl apply -f lmcache-deployment.yaml       # optional — see §6, consider skipping
-kubectl -n vllm rollout status deploy/vllm-nemotron --timeout=600s
+kubectl apply -f nemotron/nvfp4/deployment.yaml
+kubectl apply -f nemotron/common/lmcache.yaml  # optional — see §6, consider skipping
+kubectl -n vllm rollout status deploy/vllm-nemotron-nvfp4 --timeout=600s
 
-kubectl apply -f bench-nemotron/bench-pod.yaml
+kubectl apply -f nemotron/nvfp4/bench/bench-pod.yaml   # or: nemotron/nvfp4/bench/run.sh
 kubectl -n vllm wait --for=condition=Ready pod/vllm-bench --timeout=120s
 ```
 
 ### 7b. Run the sweep (with monitoring — see §8)
 
 ```bash
-kubectl -n vllm cp bench-nemotron/conc_sweep_resume.sh vllm-bench:/root/conc_sweep_resume.sh
+kubectl -n vllm cp nemotron/nvfp4/bench/conc_sweep_resume.sh vllm-bench-nvfp4:/root/conc_sweep_resume.sh
 kubectl -n vllm exec vllm-bench -- chmod +x /root/conc_sweep_resume.sh
 kubectl -n vllm exec vllm-bench -- bash -lc '/root/conc_sweep_resume.sh'
 ```
@@ -402,16 +413,16 @@ TPOT p50 < 80 ms.
 
 ## 8. Monitoring / forensics tooling (built in session 2)
 
-All under `bench-nemotron/`. Everything writes `O_SYNC`, because an instant SoC reset discards the
+All under `nemotron/tools/` (they are variant-agnostic). Everything writes `O_SYNC`, because an instant SoC reset discards the
 page cache — that is why session 1's logs "ended mid-line" with nothing useful.
 
 | file | what |
 |---|---|
-| `bench-nemotron/spark-forensics-setup.sh` | **run as root on the node.** Dumps pstore + rasdaemon DB + the tail of every crashed boot; arms netconsole at a collector IP; sets journald `SyncIntervalSec=1s`; installs `crashmon.service`. Idempotent. Edit `MAC_IP` before use. |
-| `bench-nemotron/crashmon.py` | 1 Hz system sampler → `sysmon.csv`: GPU temp/util/clock/power/throttle, MemAvailable, Committed_AS, Dirty, **PSI cpu/mem/io**, loadavg, NVMe temp, all 7 thermal zones. Installed as `crashmon.service` (auto-restarts after a crash-reboot). |
-| `bench-nemotron/gpumon.py` | 10 Hz GPU sampler → `gpu10hz.csv`. One long-lived `nvidia-smi -lms 100`. Needed to see the 3 s power sawtooth that 1 Hz averages away. **Not** a service — restart manually via `start-telemetry.sh` after a reboot. |
-| `bench-nemotron/start-telemetry.sh` | launcher for `gpumon.py`. Kept as a file specifically so the ssh command line never contains the `pkill` pattern (an inline `pkill -f gpumon.py` matches — and kills — its own shell). |
-| `bench-nemotron/conc_sweep_resume.sh` | sweep starting at N=12, with `dd oflag=dsync` level markers. |
+| `nemotron/tools/spark-forensics-setup.sh` | **run as root on the node.** Dumps pstore + rasdaemon DB + the tail of every crashed boot; arms netconsole at a collector IP; sets journald `SyncIntervalSec=1s`; installs `crashmon.service`. Idempotent. Edit `MAC_IP` before use. |
+| `nemotron/tools/crashmon.py` | 1 Hz system sampler → `sysmon.csv`: GPU temp/util/clock/power/throttle, MemAvailable, Committed_AS, Dirty, **PSI cpu/mem/io**, loadavg, NVMe temp, all 7 thermal zones. Installed as `crashmon.service` (auto-restarts after a crash-reboot). |
+| `nemotron/tools/gpumon.py` | 10 Hz GPU sampler → `gpu10hz.csv`. One long-lived `nvidia-smi -lms 100`. Needed to see the 3 s power sawtooth that 1 Hz averages away. **Not** a service — restart manually via `start-telemetry.sh` after a reboot. |
+| `nemotron/tools/start-telemetry.sh` | launcher for `gpumon.py`. Kept as a file specifically so the ssh command line never contains the `pkill` pattern (an inline `pkill -f gpumon.py` matches — and kills — its own shell). |
+| `nemotron/nvfp4/bench/conc_sweep_resume.sh` | sweep starting at N=12, with `dd oflag=dsync` level markers. |
 
 **Collector side (netconsole):** `nc -u -l 6666 > netconsole.log` on the machine named in
 `MAC_IP`. Verify it works before trusting silence:
@@ -430,25 +441,26 @@ Plugging `enP7s7` (5GbE) in would make it more reliable.
 | path | what |
 |---|---|
 | `BENCHMARK-HANDOFF.md` | this doc |
-| `bench-nemotron/bench-pod.yaml` | load-generator pod (same image, no GPU, HF cache mounted RO) |
-| `bench-nemotron/conc_sweep.sh` | original full sweep (levels 1…64) |
-| `bench-nemotron/conc_sweep_resume.sh` | resume sweep from N=12, with synced markers |
-| `bench-nemotron/run_sweep.sh` | host orchestrator: memory guard + launch + collect |
-| `bench-nemotron/crashmon.py`, `bench-nemotron/gpumon.py`, `bench-nemotron/start-telemetry.sh`, `bench-nemotron/spark-forensics-setup.sh` | §8 tooling |
-| `bench-nemotron/crash-evidence-2026-08-28/` | **crash #4 evidence** — see below |
-| `nemotron-deployment.yaml` | vLLM engine (repo root) — has the 08-28 caps |
-| `lmcache-deployment.yaml` | LMCache MP server (repo root) — has the 08-28 caps |
+| `nemotron/nvfp4/bench/bench-pod.yaml` | load-generator pod (same image, no GPU, HF cache mounted RO) |
+| `nemotron/nvfp4/bench/conc_sweep.sh` | original full sweep (levels 1…64) |
+| `nemotron/nvfp4/bench/conc_sweep_resume.sh` | resume sweep from N=12, with synced markers |
+| `nemotron/nvfp4/bench/run_sweep.sh` | host orchestrator: memory guard + launch + collect |
+| `nemotron/tools/crashmon.py`, `nemotron/tools/gpumon.py`, `nemotron/tools/start-telemetry.sh`, `nemotron/tools/spark-forensics-setup.sh` | §8 tooling (variant-agnostic) |
+| `nemotron/nvfp4/evidence/crash-evidence-2026-08-28/` | **crash #4 evidence** — see below |
+| `nemotron/nvfp4/deployment.yaml` | vLLM engine — has the 08-28 caps |
+| `nemotron/common/lmcache.yaml` | LMCache MP server — has the 08-28 caps |
 | `lmcache-benchmark-report.md` | earlier A/B (LMCache on vs off) full report + first crash write-up |
-| `bench-nemotron/bench_config.json` | `lmcache bench engine` — HEAVY long-doc-qa, 978 requests, forces KV eviction |
-| `bench-nemotron/bench_config_smoke.json` | `lmcache bench engine` — 15 requests, nothing evicts; plumbing check |
-| `bench-nemotron/bench_config_sweep.json` | `lmcache bench engine` — sweep base, 27 requests per level |
-| `bench-nemotron/bench_config_mrc.json` | `lmcache bench engine` — multi-round-chat, 8 concurrent sessions |
-| `bench-nemotron/bench_config.UNSAFE-crashed-the-node.json` | quarantined config that caused an 08-27 crash |
-| `bench-nemotron/run.sh`, `bench-nemotron/sweep.sh` | drivers for the four configs above (ConfigMap + pod + follow logs) |
-| `bench-nemotron/sweep-pod.yaml` | sequential concurrency sweep, one pod, fsync'd level markers |
-| `bench-nemotron/nemotron_run.sh` | the raw uncapped `vllm serve` argv (reference only — NOT the deployed caps) |
+| `nemotron/nvfp4/bench/bench_config.json` | `lmcache bench engine` — HEAVY long-doc-qa, 978 requests, forces KV eviction |
+| `nemotron/nvfp4/bench/bench_config_smoke.json` | `lmcache bench engine` — 15 requests, nothing evicts; plumbing check |
+| `nemotron/nvfp4/bench/bench_config_sweep.json` | `lmcache bench engine` — sweep base, 27 requests per level |
+| `nemotron/nvfp4/bench/bench_config_mrc.json` | `lmcache bench engine` — multi-round-chat, 8 concurrent sessions |
+| `nemotron/nvfp4/bench/bench_config.UNSAFE-crashed-the-node.json` | quarantined config that caused an 08-27 crash |
+| `nemotron/nvfp4/bench/run.sh`, `nemotron/nvfp4/bench/sweep.sh` | drivers for the four configs above (ConfigMap + pod + follow logs) |
+| `nemotron/nvfp4/bench/sweep-pod.yaml` | sequential concurrency sweep, one pod, fsync'd level markers |
+| `nemotron/nvfp4/reference/nemotron_run.sh` | the raw uncapped `vllm serve` argv (reference only — NOT the deployed caps) |
+| `nemotron/nvfp4/results/` | `bench_results{,_2,_ab}.txt`, `bench_results.csv` — the runs behind §5 and the A/B report |
 
-`bench-nemotron/crash-evidence-2026-08-28/` contains: `sysmon.csv` (1 Hz, both boots),
+`nemotron/nvfp4/evidence/crash-evidence-2026-08-28/` contains: `sysmon.csv` (1 Hz, both boots),
 `gpu10hz.csv` (10 Hz, 5,530 samples through the crash), `MARKERS.txt` (level timings),
 `bench-summary.csv`, `conc-12.{json,log}`, `netconsole.log` (the verified-working,
 crash-silent capture), `ras-summary.txt`.

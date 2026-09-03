@@ -1,7 +1,7 @@
 {
   "_comment": "multi-round-chat on nemotron-3.5-lightning. SIZING RULE -- this workload's Session.exchanges list grows FOREVER: prompt(round N) = shared + history + N*(user_input + output). Here 2000 + 20000 + N*756; rounds-per-session = qps*duration/num_users = 2*180/8 = 45, so the worst-case turn is 2000+20000+45*756 = ~56k against a 262144 max-model-len -- roughly a fifth of the ceiling. Do not raise mrc_user_input_length without redoing this arithmetic: on gemma4 an --mrc-user-input-length=100000 put round 2 at 130945 input tokens and vLLM rejected it with VLLMValidationError. num_concurrent_users is DERIVED as kv_cache_volume*tokens_per_gb_kvcache/(shared+history) = 0.54*326000/22000 = 8, chosen to match --max-num-seqs 32 headroom and the measured capacity knee of 8 concurrent long-context users (BENCHMARK-HANDOFF.md section 6). tokens_per_gb_kvcache is pinned rather than auto-resolved from the LMCache MP server so the derived user count cannot drift with cache state. AUTH: `model` MUST stay set -- the /v1/models auto-detect probe does not carry the bearer token and 401s against the authenticated endpoint.",
   "workload": "multi-round-chat",
-  "engine_url": "http://vllm-nemotron.vllm.svc.cluster.local:8000",
+  "engine_url": "http://vllm-nemotron-nvfp4.vllm.svc.cluster.local:8000",
   "lmcache_url": "http://lmcache-http.vllm.svc.cluster.local",
   "model": "nemotron-3.5-lightning",
   "seed": 42,

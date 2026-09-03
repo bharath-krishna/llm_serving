@@ -20,9 +20,20 @@ metadata:
 spec:
   selector:
     matchLabels:
-      app: vllm-nemotron # the Service `vllm-nemotron` (port name: http -> 8000)
+      # The variant-agnostic Service `vllm-nemotron-active`
+      # (nemotron/common/service-active.yaml, port name: http -> 8000), NOT a
+      # per-variant one. It selects on the pod label `serving: nemotron` that
+      # both nemotron variants carry, so this is ONE continuous scrape target
+      # that spans a variant switch -- and it fixes BF16 having been entirely
+      # unscraped while the selector named the NVFP4 Service directly.
+      app: vllm-nemotron-active
   namespaceSelector:
     matchNames: ["vllm"]
+  # Copy the pod's `variant` label (nvfp4 | bf16) onto every series, so a query
+  # can tell which engine produced a sample. Without this the switch is
+  # invisible in the metrics and two variants' numbers silently concatenate.
+  podTargetLabels:
+    - variant
   endpoints:
     - port: http # vLLM serves /metrics on the API port
       path: /metrics
@@ -58,7 +69,13 @@ metadata:
 spec:
   selector:
     matchLabels:
-      monitoring: "true" # only the headless `lmcache` Service (not `lmcache-http`)
+      # This label lives on exactly one Service -- `lmcache-http` in
+      # nemotron/common/lmcache-services.yaml -- which selects on the pod label
+      # `serving: lmcache` and therefore follows whichever variant's LMCache
+      # server is currently up (there is one per variant). One scrape target,
+      # continuous across a switch; the headless `lmcache` Service is
+      # deliberately NOT labelled, or it would double-scrape the same pod.
+      monitoring: "true"
   namespaceSelector:
     matchNames: ["vllm"]
   endpoints:

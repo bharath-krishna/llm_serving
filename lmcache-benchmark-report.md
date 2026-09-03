@@ -1,9 +1,18 @@
 # LMCache KV-offload on Nemotron-3.5-Lightning (DGX Spark / GB10) — Benchmark Report
 
+> **Scope: the NVFP4 variant only.** The block size 2128, the ~326,000 KV
+> tokens/GiB and the 17.85 GiB of weights in §10.3 are all
+> `…-A3B-NVFP4` measurements. The BF16 variant (`nemotron/bf16/`) does not use
+> LMCache and has none of these figures measured — see `nemotron/bf16/README.md`.
+>
+> Paths were reorganised on 2026-08-31; `nemotron-deployment.yaml` is now
+> `nemotron/nvfp4/deployment.yaml` and `lmcache-deployment.yaml` is now
+> `nemotron/common/lmcache.yaml`.
+
 **Date:** 2026-08-27
 **Cluster:** DGX Spark (GB10, arm64, single GPU, 128 GiB unified memory), node `spark-45f7`, namespace `vllm`
 **Engine:** `vllm/vllm-openai:v0.27.1`, model `nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4` (hybrid Mamba2 + attention, NVFP4)
-**Cache:** standalone LMCache 0.5.3 MP server (`lmcache-deployment.yaml`), `LMCacheMPConnector`, L1 pinned DRAM + L2 `fs` adapter on NVMe (`/var/lib/lmcache-l2`)
+**Cache:** standalone LMCache 0.5.3 MP server (`nemotron/common/lmcache.yaml`), `LMCacheMPConnector`, L1 pinned DRAM + L2 `fs` adapter on NVMe (`/var/lib/lmcache-l2`)
 **Bench tool:** `lmcache bench engine` (LMCache 0.5.4 client), workload `long-doc-qa`
 
 ---
@@ -96,7 +105,7 @@ Memory budget on the 128 GiB unified pool at crash time:
 
 The key change: **cap the vLLM KV pool explicitly** so a modest working set overflows it *without* consuming enough memory to threaten the box.
 
-### 4.1 vLLM (`nemotron-deployment.yaml`, temporary — reverted after the run)
+### 4.1 vLLM (`nemotron/nvfp4/deployment.yaml`, temporary — reverted after the run)
 
 ```diff
 - --gpu-memory-utilization 0.50
@@ -108,7 +117,7 @@ Effect: vLLM total footprint ~64 GiB → **~34 GiB**. Measured KV pool: **3 260 
 
 > Note: the vLLM flag is `--kv-cache-memory-bytes` (arg-utils field `kv_cache_memory_bytes`), **not** `--kv-cache-memory`. It accepts a raw byte count.
 
-### 4.2 LMCache (`lmcache-deployment.yaml`, temporary — reverted)
+### 4.2 LMCache (`nemotron/common/lmcache.yaml`, temporary — reverted)
 
 ```diff
 - --l1-size-gb 8
@@ -117,7 +126,7 @@ Effect: vLLM total footprint ~64 GiB → **~34 GiB**. Measured KV pool: **3 260 
 + --max-workers 2
 ```
 
-### 4.3 Benchmark (`bench_config.json`)
+### 4.3 Benchmark (`nemotron/nvfp4/bench/bench_config.json`)
 
 ```json
 {
@@ -157,7 +166,7 @@ Three phases, driven by `scratchpad/ab_bench2.sh`:
 
 `seed: 42` + deterministic synthetic documents → A₁, A₂, B all generate the identical 978-request sequence. `ignore_eos: true` fixes output length at 128 tokens for a reproducible decode phase.
 
-After B, the script restored the original `nemotron-deployment.yaml`, `lmcache-deployment.yaml`, and `bench_config.json` from backups and redeployed.
+After B, the script restored the original engine manifest, LMCache manifest, and `bench_config.json` from backups and redeployed.
 
 ---
 
@@ -266,7 +275,7 @@ The production `--gpu-memory-utilization 0.50` gives a **37.7 GiB / 12.29 M-toke
 2. **Keep `--enable-prefix-caching` on** — it is the fast path (zero-copy local hits); LMCache only fills its misses. The two stack.
 3. **Do not benchmark LMCache with a working set that fits the GPU pool** — the result is always "no difference," and it is not informative.
 4. **Memory safety for future large-scale tests on this box:** never run an eviction-forcing benchmark without capping the vLLM KV pool (`--kv-cache-memory-bytes`) or lowering `--gpu-memory-utilization`. Idle headroom under the production config is only ~36 GiB, and a GPU driver OOM crashes the whole node.
-5. ~~**Fix `tokens_per_gb_kvcache` in `bench-nemotron/bench_config.json`**~~ — DONE 2026-08-30: it is now 326 000. The real value for this model is **~326 000** (was 91 000). Or drop the key and let the bench auto-resolve from `https://lmcache.krishb.in/status`.
+5. ~~**Fix `tokens_per_gb_kvcache` in `nemotron/nvfp4/bench/bench_config.json`**~~ — DONE 2026-08-30: it is now 326 000. The real value for this model is **~326 000** (was 91 000). Or drop the key and let the bench auto-resolve from `https://lmcache.krishb.in/status`.
 6. **A₁ (cold-L2 warm-up run) can be skipped** in future A/B runs; A₁ ≈ A₂.
 7. If OpenCode / interactive sessions crash the box again, the mitigation is the same class of change: cap the KV pool and/or lower `--l1-size-gb`, not `--block-size` (which is pinned to 2128 for this hybrid model).
 
@@ -279,9 +288,9 @@ The production `--gpu-memory-utilization 0.50` gives a **37.7 GiB / 12.29 M-toke
 | path | role |
 |---|---|
 | `bench_ab_results.txt` | raw driver log + all three result blocks + LMCache metric snapshots |
-| `nemotron-deployment.yaml` | vLLM engine (restored to production config: `--gpu-memory-utilization 0.50`, `--kv-transfer-config` present, no `--kv-cache-memory-bytes`) |
-| `lmcache-deployment.yaml` | LMCache MP server (restored: `--l1-size-gb 8`, `--max-workers 4`) |
-| `bench-nemotron/bench_config.json` | bench config (moved from the repo root 2026-08-30) |
+| `nemotron/nvfp4/deployment.yaml` | vLLM engine (restored to production config: `--gpu-memory-utilization 0.50`, `--kv-transfer-config` present, no `--kv-cache-memory-bytes`) |
+| `nemotron/common/lmcache.yaml` | LMCache MP server (restored: `--l1-size-gb 8`, `--max-workers 4`) |
+| `nemotron/nvfp4/bench/bench_config.json` | bench config (moved from the repo root 2026-08-30, then under `nemotron/` 2026-08-31) |
 | `scratchpad/ab_bench2.sh` | the A/B driver (capped configs, memory guard, auto-restore) |
 | `scratchpad/raw2_*.txt`, `scratchpad/csv2_*.csv` | per-phase raw bench output + per-request CSVs |
 | `scratchpad/*.orig` | pre-run backups of the three config files |
@@ -289,7 +298,7 @@ The production `--gpu-memory-utilization 0.50` gives a **37.7 GiB / 12.29 M-toke
 ### 10.2 Post-run cluster state
 
 - Node `spark-45f7`: `Ready`.
-- `vllm-nemotron` + `lmcache` pods: `Running`, production config, LMCache connected.
+- `vllm-nemotron` (now `vllm-nemotron-nvfp4`) + `lmcache` pods: `Running`, production config, LMCache connected.
 - Host memory: ~45 GiB used / ~79 GiB available (settling as the engine finishes warm-up).
 - L2 cache dir `/var/lib/lmcache-l2`: contains chunks from the benchmark documents (synthetic "hi"-token docs; harmless, LRU-evicted over time, or `rm -rf /var/lib/lmcache-l2/*` on the node to clear).
 

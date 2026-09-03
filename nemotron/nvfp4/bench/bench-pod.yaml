@@ -1,4 +1,4 @@
-# `lmcache bench engine` driver for the nemotron-3.5-lightning deployment.
+# `lmcache bench engine` driver for the NVFP4 variant (vllm-nemotron-nvfp4).
 #
 # The configs are delivered by ConfigMap, so a bench never depends on a file
 # happening to exist on the node. Build/refresh it from the repo before every
@@ -10,14 +10,14 @@
 # run.sh rebuilds the ConfigMap and patches CONFIG_NAME below. To drive it by
 # hand instead:
 #
-#   kubectl create configmap vllm-bench-config -n vllm \
+#   kubectl create configmap vllm-bench-config-nvfp4 -n vllm \
 #     --from-file=bench_config.json --from-file=bench_config_smoke.json \
 #     --from-file=bench_config_mrc.json --from-file=bench_config_sweep.json \
 #     --from-file=bench_config_permutator.json \
 #     --dry-run=client -o yaml | kubectl apply -f -
 #
-#   kubectl delete pod vllm-bench -n vllm --ignore-not-found
-#   kubectl apply -f bench-pod.yaml && kubectl logs -n vllm -f vllm-bench
+#   kubectl delete pod vllm-bench-nvfp4 -n vllm --ignore-not-found
+#   kubectl apply -f bench-pod.yaml && kubectl logs -n vllm -f vllm-bench-nvfp4
 #
 # Pick the workload with the CONFIG_NAME env below:
 #   bench_config_smoke.json  ->   15 requests, nothing evicts        (safe)
@@ -29,17 +29,19 @@
 #
 # Results land on the node's real disk (hostPath /var/lib/vllm-bench-results),
 # NOT a tmpfs -- session 1 of the nemotron sweep lost everything to a tmpfs when
-# the node hard-reset. See BENCHMARK-HANDOFF.md section 3.
+# the node hard-reset. See BENCHMARK-HANDOFF.md section 3. Runs go under the
+# `nvfp4/` subdirectory so they can never be confused with BF16 runs, which use
+# the same hostPath.
 apiVersion: v1
 kind: Pod
 metadata:
-  name: vllm-bench
+  name: vllm-bench-nvfp4
   namespace: vllm
-  labels: { app: vllm-bench }
+  labels: { app: vllm-bench-nvfp4, variant: nvfp4 }
 spec:
   restartPolicy: Never
   # Same rootfs/CDI env as the server pods, but NO GPU is requested: this is a
-  # pure HTTP client. Requesting one would contend with the vllm-nemotron pod.
+  # pure HTTP client. Requesting one would contend with the engine pod.
   runtimeClassName: nvidia
   containers:
     - name: bench
@@ -48,7 +50,7 @@ spec:
       args:
         - |
           set -euo pipefail
-          RUN="/results/nemotron-${CONFIG_NAME%.json}-$(date -u +%Y%m%dT%H%M%SZ)"
+          RUN="/results/nvfp4/nemotron-${CONFIG_NAME%.json}-$(date -u +%Y%m%dT%H%M%SZ)"
           mkdir -p "$RUN"
           # Snapshot the exact config next to its results: the ConfigMap is
           # mutable and a later edit would otherwise silently re-label this run.
@@ -59,14 +61,21 @@ spec:
             --output-dir "$RUN" \
             --json 2>&1 | tee "$RUN/bench.log"
       env:
-        # Which config to run. Must name a key in the vllm-bench-config
+        # Which config to run. Must name a key in the vllm-bench-config-nvfp4
         # ConfigMap -- the volume below surfaces every key as /config/<key>.
+        #
+        # __CONFIG_NAME__ is a PLACEHOLDER that run.sh substitutes. It is not a
+        # runnable default on purpose: this used to hold a real config name and
+        # run.sh sed'd for that literal, so when the default was edited the
+        # substitution silently stopped matching and every run quietly executed
+        # whatever was pinned here instead of the requested config. A token that
+        # cannot be a valid config name makes that failure impossible to miss.
         - name: CONFIG_NAME
-          value: bench_config.json
+          value: __CONFIG_NAME__
         - name: LMCACHE_DISABLE_BANNER
           value: "1"
         # The vllm endpoints require auth: the server reads VLLM_API_KEY from
-        # the shared `vllm-auth` Secret (see nemotron-deployment.yaml), and the
+        # the shared `vllm-auth` Secret (see ../../common/SECRETS.md), and the
         # client sends whatever is in OPENAI_API_KEY as its bearer token. Both
         # sides therefore read the SAME Secret key, and a rotation re-rolls the
         # deployments while any bench pod picks it up on next create. Without
@@ -93,7 +102,7 @@ spec:
         limits: { cpu: "4", memory: 8Gi }
   volumes:
     - name: config
-      configMap: { name: vllm-bench-config }
+      configMap: { name: vllm-bench-config-nvfp4 }
     - name: hf
       hostPath: { path: /home/bharath/.cache/huggingface, type: Directory }
     - name: results

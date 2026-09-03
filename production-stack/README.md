@@ -1,6 +1,7 @@
 # vLLM Production Stack deployment
 
-Replaces the hand-rolled `../nemotron-deployment.yaml` and `../gemma4-deployment.yaml`
+An ALTERNATE to the hand-rolled `../nemotron/` manifests and `../gemma4-deployment.yaml`
+(it is not what is currently deployed — see `../nemotron/README.md`)
 with the [vLLM Production Stack](https://docs.vllm.ai/projects/production-stack/en/latest/getting_started/quickstart.html)
 Helm chart (`vllm/vllm-stack` **0.1.12**): a router (OpenAI-compatible front door +
 metrics) plus one serving engine per model.
@@ -173,7 +174,7 @@ the second. To isolate LMCache from vLLM's own GPU prefix cache, launch with
 ```bash
 helm uninstall vllm -n vllm
 kubectl delete pv vllm-shared-pvc-storage
-kubectl apply -f nemotron-deployment.yaml
+kubectl apply -f nemotron/nvfp4/deployment.yaml
 ```
 
 The shared-cache PV is a hostPath to `~/.cache/huggingface`, left untouched.

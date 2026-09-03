@@ -1,34 +1,58 @@
+# NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 -- the default variant.
+#
+# This is one of two nemotron variants; the other is ../bf16/deployment.yaml.
+# The node has ONE GPU and both request `nvidia.com/gpu: "1"`, so only one can
+# ever be Running -- the other stays Pending forever. Never scale both up by
+# hand; use ../switch.sh, which sequences the scale-down/scale-up (and the
+# matching LMCache server) correctly.
+#
+# The committed default is replicas: 1 -- NVFP4 is the known-good variant, the
+# one every measured constant in BENCHMARK-HANDOFF.md and
+# lmcache-benchmark-report.md was taken against.
+#
+# HOW THE PUBLIC URL FINDS THIS POD. The pod label `serving: nemotron` (below)
+# is what ../common/service-active.yaml selects on, and that Service is what the
+# Ingress points at permanently. There is deliberately NO Ingress in this file:
+# see ../common/ingress.yaml for what happened the last time a variant shipped
+# its own. The `vllm-nemotron-nvfp4` Service at the bottom is for benchmarks,
+# which target a variant explicitly so a run can never be ambiguous about which
+# engine answered.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: vllm-nemotron
+  name: vllm-nemotron-nvfp4
   namespace: vllm
   labels:
-    app: vllm-nemotron
+    app: vllm-nemotron-nvfp4
 spec:
-  replicas: 1
+  replicas: 1 # single GPU -- switch with ../switch.sh, never by hand
   selector:
     matchLabels:
-      app: vllm-nemotron
+      app: vllm-nemotron-nvfp4
   strategy:
     type: Recreate
   template:
     metadata:
       labels:
-        app: vllm-nemotron
+        app: vllm-nemotron-nvfp4
+        # Selected by ../common/service-active.yaml. Both variants carry it;
+        # only one pod is ever Running, so the live endpoint is unambiguous.
+        serving: nemotron
+        # Copied onto every scraped series by the ServiceMonitor's
+        # podTargetLabels, so a metrics query can tell the variants apart.
+        variant: nvfp4
     spec:
       runtimeClassName: nvidia
       hostIPC: true
       containers:
         - name: vllm
           image: vllm/vllm-openai:v0.27.1
-          # command: ["sleep", "infinity"]
           command: ["/bin/bash", "-c"]
           args:
             - |
               # --served-model-name takes nargs='+': the FIRST name is what the
               # API reports, the rest are accepted aliases. The repo-ID alias is
-              # load-bearing for bench-nemotron/bench_config_permutator.json --
+              # load-bearing for bench/bench_config_permutator.json --
               # long-doc-permutator sizes contexts in exact tokens, so it feeds
               # `model` to AutoTokenizer.from_pretrained AND into the request
               # payload. The served name is not a repo ID (tokenizer load fails);
@@ -71,25 +95,9 @@ spec:
                 --port 8000 \
                 --kv-transfer-config '{"kv_connector":"LMCacheMPConnector", "kv_role":"kv_both", "kv_connector_extra_config": {"lmcache.mp.host": "tcp://lmcache.vllm.svc.cluster.local", "lmcache.mp.port": 5555}}'
           env:
-            # Shared auth for every OpenAI-compatible endpoint in this namespace
-            # (vllm-auth Secret; gemma4 and nemotron use the same key). vLLM
-            # treats VLLM_API_KEY as the fallback for --api-key
-            # (entrypoints/openai/api_server.py:266), so this is equivalent to
-            # passing the flag -- but the key stays out of git and out of
-            # `kubectl get deploy -o yaml` argv. Without it these endpoints are
-            # OPEN, UNAUTHENTICATED LLM APIs: *.krishb.in resolves publicly
-            # (103.76.103.148) and already takes internet scanner traffic. That
-            # is not just inference theft -- an anonymous caller can submit
-            # max-model-len-sized requests, and sustained load on this box
-            # hard-resets the node (BENCHMARK-HANDOFF.md section 3).
-            #
-            # Rotate (re-rolls BOTH deployments, and any bench pod picks it up
-            # on next create):
-            #   kubectl create secret generic vllm-auth -n vllm \
-            #     --from-literal=api-key="sk-vllm-$(python3 -c \
-            #       'import secrets;print(secrets.token_urlsafe(32))')" \
-            #     --dry-run=client -o yaml | kubectl apply -f -
-            #   kubectl rollout restart deploy/vllm-gemma4 deploy/vllm-nemotron -n vllm
+            # Shared auth for every OpenAI-compatible endpoint in this namespace.
+            # Creation, rotation and the reasoning behind sharing one key across
+            # both variants: ../common/SECRETS.md.
             - name: VLLM_API_KEY
               valueFrom:
                 secretKeyRef:
@@ -105,7 +113,7 @@ spec:
               # KV pool, model weights, pinned transfer buffers and the OS all
               # draw from ONE 128Gi pool; an NVIDIA-driver OOM here hard-crashes
               # the node (not a recoverable pod OOM-kill). The vllm flags cap the
-              # GPU side (--kv-cache-memory-bytes 10Gi, --gpu-memory-utilization
+              # GPU side (--kv-cache-memory-bytes 512Mi, --gpu-memory-utilization
               # 0.35 => ~45Gi ceiling for the whole engine process); this cgroup
               # limit catches host-side runaway (pinned buffers, activations)
               # with a pod restart before the box locks up.
@@ -113,6 +121,24 @@ spec:
             requests:
               nvidia.com/gpu: "1"
               memory: 32Gi
+          # WITHOUT THESE the container counts as Ready the moment it starts, so
+          # `kubectl rollout status` returns in seconds, the Service takes an
+          # endpoint immediately, and the public URL serves 503s for the whole
+          # 103s the checkpoint takes to load. The startupProbe is what buys
+          # that load window; readiness then keeps the endpoint out of
+          # vllm-nemotron-active until the engine can actually answer.
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            periodSeconds: 10
+            failureThreshold: 30 # 300s budget -- checkpoint load is ~103s
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            periodSeconds: 10
+            failureThreshold: 3
           volumeMounts:
             - mountPath: /root/.cache/huggingface
               name: huggingface-cache
@@ -126,51 +152,22 @@ spec:
       # transfer reaches the lmcache server pod (also hostIPC: true). An emptyDir
       # here would give this pod a PRIVATE /dev/shm and break that channel.
 ---
+# Per-variant Service. NOT what the public URL uses -- that goes through
+# ../common/service-active.yaml. This one exists so benchmarks can address this
+# specific engine by name and a result can never be misattributed to the other
+# variant.
 apiVersion: v1
 kind: Service
 metadata:
-  name: vllm-nemotron
+  name: vllm-nemotron-nvfp4
   namespace: vllm
   labels:
-    app: vllm-nemotron
+    app: vllm-nemotron-nvfp4
 spec:
   selector:
-    app: vllm-nemotron
+    app: vllm-nemotron-nvfp4
   ports:
     - port: 8000
       targetPort: 8000
       name: http
   type: ClusterIP
----
-apiVersion: networking.k8s.io/v1
-kind: Ingress
-metadata:
-  name: vllm-nemotron
-  namespace: vllm
-  annotations:
-    haproxy.org/timeout-http-request: "600s"
-    haproxy.org/timeout-tunnel: "3600s"
-    haproxy.org/timeout-http-keep-alive: "600s"
-spec:
-  ingressClassName: haproxy
-  rules:
-    - host: nemotron.local
-      http:
-        paths:
-          - path: /
-            pathType: Prefix
-            backend:
-              service:
-                name: vllm-nemotron
-                port:
-                  number: 8000
-    - host: nemo35-lightning.krishb.in
-      http:
-        paths:
-          - path: /
-            pathType: Prefix
-            backend:
-              service:
-                name: vllm-nemotron
-                port:
-                  number: 8000

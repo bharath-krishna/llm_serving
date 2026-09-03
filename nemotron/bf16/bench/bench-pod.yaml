@@ -72,7 +72,7 @@ spec:
         # whatever was pinned here instead of the requested config. A token that
         # cannot be a valid config name makes that failure impossible to miss.
         - name: CONFIG_NAME
-          value: bench_config.json
+          value: __CONFIG_NAME__
         - name: LMCACHE_DISABLE_BANNER
           value: "1"
         # The vllm endpoints require auth: the server reads VLLM_API_KEY from

@@ -1,0 +1,34 @@
+# THE LIVE-VARIANT POINTER -- and the reason no manifest in this repo ever needs
+# patching to switch models.
+#
+# Both nemotron Deployments stamp `serving: nemotron` on their pods in addition
+# to their own `app:` label. This Service selects ONLY on that shared label, so
+# its endpoint set is whichever variant's pod is currently Running. On a
+# single-GPU node exactly one of them can be, which makes the answer unambiguous
+# without anyone having to declare it.
+#
+# What this replaces: until 2026-08-31 the Ingress named a variant's Service
+# directly and had to be re-patched in the same breath as the scale commands.
+# Forgetting that step pointed the public URL at a Service with zero endpoints.
+# Adding a second Ingress instead was worse -- haproxy-ingress binds a host to
+# exactly one Ingress and resolves ties to the OLDER one, so the new one was
+# silently ignored while the stale one kept serving 503s.
+#
+#   kubectl get endpoints vllm-nemotron-active -n vllm
+#   # empty => no variant is up (or the incoming one is still loading weights:
+#   #          ~103 s for NVFP4, ~334 s for the 61.31 GiB BF16 checkpoint)
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-nemotron-active
+  namespace: vllm
+  labels:
+    app: vllm-nemotron-active
+spec:
+  selector:
+    serving: nemotron
+  ports:
+    - port: 8000
+      targetPort: 8000
+      name: http
+  type: ClusterIP

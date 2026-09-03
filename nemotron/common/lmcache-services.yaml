@@ -1,0 +1,104 @@
+# Stable names for whichever LMCache MP server is currently up.
+#
+# There is one LMCache Deployment PER VARIANT -- ../nvfp4/lmcache.yaml and
+# ../bf16/lmcache.yaml -- because --chunk-size must equal the engine's unified
+# block size and that differs between them (2128 vs 1072; the derivation is in
+# either file's header). Splitting the servers means a variant switch never has
+# to reconfigure and restart a shared one, which would drop the live engine's
+# GPU-context registration.
+#
+# But three consumers want a name that does NOT change when the variant does:
+#
+#   * the engine's --kv-transfer-config  -> tcp://lmcache.vllm.svc.cluster.local:5555
+#   * lmcache-ui's nginx upstream        -> lmcache-http.vllm.svc.cluster.local:80
+#   * every bench config's lmcache_url   -> http://lmcache-http.vllm.svc.cluster.local
+#
+# Both server Deployments stamp `serving: lmcache` on their pods, so these two
+# Services follow the live one and none of the three consumers is ever edited.
+# Same indirection, and for the same reason, as service-active.yaml does for the
+# engines.
+#
+# EXACTLY ONE server may run at a time. Two would both match this selector and
+# the ZMQ connector would pick an endpoint arbitrarily -- with the wrong chunk
+# size behind it. ../switch.sh enforces the ordering; do not scale by hand.
+#
+#   kubectl get endpoints lmcache -n vllm
+#   kubectl get pods -n vllm -l serving=lmcache     # expect exactly one
+#
+# The engine talks to `lmcache` (headless, ZMQ) while everything else talks to
+# `lmcache-http` (ClusterIP). That split is deliberate -- see below.
+apiVersion: v1
+kind: Service
+metadata:
+  name: lmcache
+  namespace: vllm
+  labels:
+    app: lmcache
+spec:
+  selector:
+    serving: lmcache
+  # Headless: the connector opens a direct ZMQ socket to the pod, so it wants
+  # the pod IP, not a load-balanced VIP.
+  clusterIP: None
+  ports:
+    - name: zmq
+      port: 5555
+      targetPort: 5555
+    - name: http
+      port: 8080
+      targetPort: 8080
+---
+# Non-headless Service for the Ingress, the UI and Prometheus (haproxy and the
+# nginx shim both need a ClusterIP -- a headless Service resolves to a pod IP
+# that goes stale the next time the server pod is replaced). Fronts only the
+# FastAPI HTTP frontend (/status, /healthcheck, /metrics, cache-management
+# APIs) -- NOT the ZMQ port.
+apiVersion: v1
+kind: Service
+metadata:
+  name: lmcache-http
+  namespace: vllm
+  labels:
+    app: lmcache
+    # Picked up by the `lmcache` ServiceMonitor in the repo-root
+    # servicemonitors.yaml. This label lives HERE and on no other Service, so
+    # exactly one scrape target matches no matter which variant is live.
+    monitoring: "true"
+spec:
+  selector:
+    serving: lmcache
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+---
+# Public endpoint for the live server's HTTP frontend. Backed by the stable
+# `lmcache-http` Service, so like the engine Ingress it is never edited when the
+# live variant changes.
+#
+#   curl -s https://lmcache.krishb.in/status | jq .registered_gpu_ids
+#
+# Worth running after any switch: each engine restart registers a NEW GPU id and
+# the old registration lingers (the reaper is disabled -- see the server files).
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: lmcache
+  namespace: vllm
+  annotations:
+    haproxy.org/timeout-http-request: "600s"
+    haproxy.org/timeout-tunnel: "3600s"
+    haproxy.org/timeout-http-keep-alive: "600s"
+spec:
+  ingressClassName: haproxy
+  rules:
+    - host: lmcache.krishb.in
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: lmcache-http
+                port:
+                  number: 80

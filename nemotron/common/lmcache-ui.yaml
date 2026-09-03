@@ -1,0 +1,129 @@
+# LMCache WebUI (cluster monitoring dashboard).
+#
+# Shared and variant-agnostic, like the LMCache server it watches. It polls that
+# server over HTTP via the stable `lmcache-http` Service, so nothing here changes
+# when the live nemotron variant changes -- and nothing here needs to know which
+# engines are registered.
+#
+# NOT the controller from docs.lmcache.ai/controller/ -- that page documents the
+# DEPRECATED in-process mode (`python3 -m lmcache.v1.api_server` with ZMQ monitor
+# ports 8300/8400). This cluster runs MP mode (LMCacheMPConnector + the
+# multiprocess http_server), whose dashboard is `lmcache.lmcache_frontend.app`.
+#
+# It runs standalone and POLLS the MP server listed in --nodes, so nothing about
+# the existing `lmcache` Deployment changes. That matters: restarting lmcache
+# would drop the engine's GPU-context registration, forcing a nemotron restart
+# too (~5 min). The alternative wiring -- heartbeat mode, where the MP server
+# pushes to this UI via --runtime-plugin-locations -- WOULD require that restart.
+#
+# The MP server does not implement /api/nodes (404), so this UI will not
+# auto-discover child nodes; it shows the node it is told about and proxies
+# /metrics and the cache APIs to it.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: lmcache-ui
+  namespace: vllm
+  labels: { app: lmcache-ui }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: lmcache-ui }
+  template:
+    metadata:
+      labels: { app: lmcache-ui }
+    spec:
+      containers:
+        - name: ui
+          image: vllm/vllm-openai:v0.27.1 # ships lmcache 0.5.3 + uvicorn
+          command: ["python3", "-m", "lmcache.lmcache_frontend.app"]
+          args:
+            - --host
+            - "0.0.0.0"
+            - --port
+            - "8000"
+            # Static node list -> no heartbeat plugin, no lmcache restart.
+            - --nodes
+            - '[{"name":"lmcache-mp","host":"127.0.0.1","port":8081}]'
+            - --log-level
+            - info
+          ports:
+            - { containerPort: 8000, name: http }
+          resources:
+            requests: { cpu: "100m", memory: 256Mi }
+            limits: { cpu: "1", memory: 1Gi }
+        # Path-rewriting shim. The dashboard and the MP server ship in the SAME
+        # lmcache 0.5.3 wheel but disagree on paths: static/js/app.js fetches
+        # `api/status` and `conf`, while the MP http_server registers `/status`
+        # and `/config` (confirmed against its own /openapi.json). The result is
+        # app.js:467 getting a 404, `statusResp.ok` staying false, renderMpOverview
+        # never running, and the dashboard rendering empty -- even though the JSON
+        # shape is a perfect match (all 7 fields renderMpOverview reads exist on
+        # /status). This sidecar maps the two names; everything else passes
+        # through untouched. Doing it here rather than on the lmcache Deployment
+        # keeps that pod from restarting, which would drop the engine's GPU-context
+        # registration and force a nemotron restart behind it.
+        - name: pathfix
+          image: nginx:1.27-alpine
+          ports:
+            - { containerPort: 8081, name: pathfix }
+          volumeMounts:
+            - { name: nginxconf, mountPath: /etc/nginx/conf.d }
+          resources:
+            requests: { cpu: "50m", memory: 32Mi }
+            limits: { cpu: "500m", memory: 128Mi }
+      volumes:
+        - name: nginxconf
+          configMap: { name: lmcache-ui-pathfix }
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: lmcache-ui-pathfix
+  namespace: vllm
+data:
+  default.conf: |
+    # lmcache-http (ClusterIP, stable) -> MP server :8080. Deliberately NOT the
+    # headless `lmcache` Service: that resolves to a pod IP nginx would cache,
+    # going stale the next time the lmcache pod is replaced.
+    upstream lmcache_mp { server lmcache-http.vllm.svc.cluster.local:80; }
+    server {
+      listen 8081;
+      # The two renames. `= ` makes these exact matches so nothing else shifts.
+      location = /api/status { proxy_pass http://lmcache_mp/status; }
+      location = /conf       { proxy_pass http://lmcache_mp/config; }
+      # /inference_info and /meta are deliberately left to 404: MP mode genuinely
+      # has no equivalent, and app.js already degrades gracefully on them. Faking
+      # an empty 200 would make the dashboard claim data it does not have.
+      location /             { proxy_pass http://lmcache_mp; }
+    }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: lmcache-ui
+  namespace: vllm
+  labels: { app: lmcache-ui }
+spec:
+  selector: { app: lmcache-ui }
+  ports:
+    - { port: 8000, targetPort: 8000, name: http }
+  type: ClusterIP
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: lmcache-ui
+  namespace: vllm
+spec:
+  ingressClassName: haproxy
+  rules:
+    - host: lmcache-ui.krishb.in
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: lmcache-ui
+                port: { number: 8000 }

@@ -81,7 +81,8 @@ spec:
             #     --from-literal=api-key="sk-vllm-$(python3 -c \
             #       'import secrets;print(secrets.token_urlsafe(32))')" \
             #     --dry-run=client -o yaml | kubectl apply -f -
-            #   kubectl rollout restart deploy/vllm-gemma4 deploy/vllm-nemotron -n vllm
+            #   kubectl rollout restart deploy/vllm-gemma4 deploy/vllm-nemotron-nvfp4 \
+#     deploy/vllm-nemotron-bf16 -n vllm
             - name: VLLM_API_KEY
               valueFrom:
                 secretKeyRef:

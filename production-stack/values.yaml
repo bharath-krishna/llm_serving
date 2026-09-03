@@ -3,7 +3,8 @@
 #   helm repo add vllm https://vllm-project.github.io/production-stack
 #   helm upgrade --install vllm vllm/vllm-stack -n vllm -f production-stack/values.yaml
 #
-# Replaces the hand-rolled nemotron-deployment.yaml / gemma4-deployment.yaml.
+# An ALTERNATE to the hand-rolled nemotron/ manifests and gemma4-deployment.yaml.
+# NOT what is currently deployed -- see nemotron/README.md.
 # Single-GPU box (DGX Spark): only one modelSpec is `enabled` at a time.
 
 servingEngineSpec:

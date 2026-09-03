@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Concurrency sweep driver. One pod runs every level sequentially so the engine
-# is never restarted mid-sweep and the levels stay comparable to each other.
+# Concurrency sweep driver for the NVFP4 variant. One pod runs every level
+# sequentially so the engine is never restarted mid-sweep and the levels stay
+# comparable to each other.
 #
 #   ./sweep.sh                 # default levels: 1 2 4 8 12
 #   ./sweep.sh "1 2 4 8"       # explicit levels
@@ -12,7 +13,8 @@ set -euo pipefail
 cd "$(dirname "$0")"
 LEVELS="${1:-1 2 4 8 12}"
 NS=vllm
-POD=vllm-sweep
+POD=vllm-sweep-nvfp4
+CM=vllm-bench-config-nvfp4
 
 case " $LEVELS " in
   *" 16 "*|*" 24 "*|*" 32 "*)
@@ -23,7 +25,7 @@ case " $LEVELS " in
     ;;
 esac
 
-kubectl create configmap vllm-bench-config -n "$NS" \
+kubectl create configmap "$CM" -n "$NS" \
   --from-file=bench_config.json \
   --from-file=bench_config_smoke.json \
   --from-file=bench_config_mrc.json \

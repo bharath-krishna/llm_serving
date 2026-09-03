@@ -1,0 +1,52 @@
+# THE ONLY Ingress for these hosts. Both nemotron variants are reached through
+# it, because only one can run at a time (single GPU) and the domains are
+# already registered -- no second ingress, no new DNS.
+#
+# Its backend is `vllm-nemotron-active`, a Service that selects on a label both
+# variants carry, so THIS FILE IS NEVER EDITED TO SWITCH MODELS. See
+# service-active.yaml for why that indirection exists.
+#
+# Do NOT add a second Ingress for the same host, and do NOT point this one at a
+# per-variant Service. haproxy-ingress binds a host to exactly one ingress and
+# resolves ties to the OLDER one, silently ignoring the newer duplicate. That is
+# what broke 2026-08-31: the BF16 deployment shipped its own ingress for
+# nemo35-lightning.krishb.in, the older vllm-nemotron ingress won, and it pointed
+# at a Service with zero endpoints -- so the public URL failed while BF16 was
+# serving fine behind the loser.
+#
+# The name is kept as `vllm-nemotron` (not -active) so this replaces the existing
+# object in place rather than racing it for the host.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: vllm-nemotron
+  namespace: vllm
+  annotations:
+    # Long-context prefill on this model runs for minutes; the defaults (60s)
+    # cut streaming responses off mid-generation.
+    haproxy.org/timeout-http-request: "600s"
+    haproxy.org/timeout-tunnel: "3600s"
+    haproxy.org/timeout-http-keep-alive: "600s"
+spec:
+  ingressClassName: haproxy
+  rules:
+    - host: nemotron.local
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: vllm-nemotron-active
+                port:
+                  number: 8000
+    - host: nemo35-lightning.krishb.in
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: vllm-nemotron-active
+                port:
+                  number: 8000
